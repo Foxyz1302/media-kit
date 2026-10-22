@@ -43,6 +43,11 @@ Trade-offs become opt-in presets: buffer sizes (feed/stream), desktop render qua
 
 Assume the apps mostly use custom overlays, so the core must be cheap for them.
 
+- A process-wide hardware-decoder budget, `maxHardwareDecoders`, enforced across all players:
+  - over the budget, players fall back to CPU decoding (`hwdec=no`) or stay paused on a poster; the app chooses which;
+  - the visible/active player gets priority.
+  - Why: mobile chips have small per-codec limits (the user's phone: 6 for VP9), and on the user's desktop (legacy NVIDIA 580 driver on Wayland) several simultaneous hardware decodes corrupt the screen, in any app.
+
 ## Binaries
 - **Windows:** use freeKC's 20261021-1 builds (LGPLv3; contains the d3d11va zero-copy fix). Later, rewrite the renderer on mpv's D3D11 render API, which needs the fork's own build and drops ANGLE.
 - **Android:** keep the current binary for development. Before the first mobile release, ship our own build from Predidit's scripts, pinned to stable mpv/FFmpeg, with libplacebo built for OpenGL only. Fallback: Predidit v1.3.1 (minSdk 26).
