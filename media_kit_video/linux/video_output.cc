@@ -279,9 +279,10 @@ VideoOutput* video_output_new(FlTextureRegistrar* texture_registrar,
                 // (llvmpipe is Mesa's software renderer)
                 g_print(
                     "media_kit: VideoOutput: H/W rendering with isolated EGL "
-                    "context (%s, %s).\n",
+                    "context (%s, %s, %s).\n",
                     isolated_egl_windowing_system(),
-                    renderer != NULL ? renderer : "unknown renderer");
+                    renderer != NULL ? renderer : "unknown renderer",
+                    texture_gl_get_sync_name(self->texture_gl));
               } else {
                 g_printerr("media_kit: VideoOutput: Failed to create mpv_render_context.\n");
                 software_reason = "mpv refused the OpenGL render context";

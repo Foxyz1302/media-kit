@@ -33,6 +33,11 @@ TextureGL* texture_gl_new(VideoOutput* video_output);
 void texture_gl_release(TextureGL* self);
 
 /**
+ * @brief How a frame is handed from mpv's context to Flutter's, for the log.
+ */
+const gchar* texture_gl_get_sync_name(TextureGL* self);
+
+/**
  * @brief Populates texture with video frame.
  */
 gboolean texture_gl_populate_texture(FlTextureGL* texture,

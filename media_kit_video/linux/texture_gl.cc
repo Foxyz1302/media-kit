@@ -84,6 +84,8 @@ struct _TextureGL {
   EGLImageKHR egl_image;     // EGLImage for sharing between contexts
   guint32 current_width;
   guint32 current_height;
+  gboolean fence_sync;       // EGL_KHR_fence_sync: frames are handed over with a fence
+  gboolean wait_sync;        // EGL_KHR_wait_sync: Flutter's context waits on the GPU
   gboolean egl_error_logged;
   VideoOutput* video_output; // NULL once released
 };
@@ -101,6 +103,8 @@ static void texture_gl_init(TextureGL* self) {
   self->egl_image = EGL_NO_IMAGE_KHR;
   self->current_width = 1;
   self->current_height = 1;
+  self->fence_sync = FALSE;
+  self->wait_sync = FALSE;
   self->egl_error_logged = FALSE;
   self->video_output = NULL;
 }
@@ -186,7 +190,22 @@ static void texture_gl_class_init(TextureGLClass* klass) {
 TextureGL* texture_gl_new(VideoOutput* video_output) {
   TextureGL* self = TEXTURE_GL(g_object_new(texture_gl_get_type(), NULL));
   self->video_output = video_output;
+  EGLDisplay egl_display = video_output_get_egl_display(video_output);
+  self->fence_sync =
+      epoxy_has_egl_extension(egl_display, "EGL_KHR_fence_sync");
+  self->wait_sync = self->fence_sync &&
+                    epoxy_has_egl_extension(egl_display, "EGL_KHR_wait_sync");
   return self;
+}
+
+const gchar* texture_gl_get_sync_name(TextureGL* self) {
+  if (self->wait_sync) {
+    return "EGL fence, GPU wait";
+  }
+  if (self->fence_sync) {
+    return "EGL fence, CPU wait";
+  }
+  return "glFinish";
 }
 
 void texture_gl_release(TextureGL* self) {
@@ -366,6 +385,7 @@ static void texture_gl_render(TextureGL* self,
   
   // Switch to mpv's isolated context for rendering
   IsolatedEglSaved saved;
+  EGLSyncKHR rendered = EGL_NO_SYNC_KHR;
   if (texture_gl_enter(self, egl_display, egl_context, &saved)) {
     // Bind mpv's FBO
     glBindFramebuffer(GL_FRAMEBUFFER, self->fbo);
@@ -394,17 +414,31 @@ static void texture_gl_render(TextureGL* self,
     // Unbind FBO
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     
-    // Ensure rendering is complete. The blit path waits for it like #1464
-    // was tested with; the direct path keeps the flush it always had
-    if (self->export_fbo != 0) {
-      glFinish();
-    } else {
+    // The fence signals once the frame is complete; it is flushed with it, as
+    // Flutter's context waits on it from another command stream. Without
+    // fences, the blit path waits for the frame like #1464 was tested with
+    // and the direct path keeps the flush it always had
+    if (self->fence_sync) {
+      rendered = eglCreateSyncKHR(egl_display, EGL_SYNC_FENCE_KHR, NULL);
+    }
+    if (rendered != EGL_NO_SYNC_KHR || self->export_fbo == 0) {
       glFlush();
+    } else {
+      glFinish();
     }
   }
   
   // Restore Flutter's context
-  texture_gl_leave(self, egl_display, &saved);
+  if (texture_gl_leave(self, egl_display, &saved) &&
+      rendered != EGL_NO_SYNC_KHR) {
+    // Flutter's draws of the texture wait for the frame on the GPU; the
+    // raster thread waits only without EGL_KHR_wait_sync
+    if (!self->wait_sync || !eglWaitSyncKHR(egl_display, rendered, 0)) {
+      eglClientWaitSyncKHR(egl_display, rendered,
+                           EGL_SYNC_FLUSH_COMMANDS_BIT_KHR, EGL_FOREVER_KHR);
+    }
+    eglDestroySyncKHR(egl_display, rendered);
+  }
 }
 
 gboolean texture_gl_populate_texture(FlTextureGL* texture,
