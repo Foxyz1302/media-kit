@@ -132,6 +132,20 @@ class AndroidVideoController extends PlatformVideoController {
         if (!waitUntilFirstFrameRenderedCompleter.isCompleted) {
           waitUntilFirstFrameRenderedCompleter.complete();
         }
+
+        if (configuration.vo == 'mediacodec_embed') {
+          final hwdec = await platform.getProperty(
+            'hwdec-current',
+            waitForInitialization: false,
+          );
+          if (hwdec.isEmpty || hwdec == 'no') {
+            debugPrint(
+              'media_kit: --vo=mediacodec_embed only displays MediaCodec output, but this video is '
+              'software-decoded (hwdec-current=${hwdec.isEmpty ? 'none' : hwdec}), e.g. a format '
+              'without a hardware decoder on this device. Use --vo=gpu for it.',
+            );
+          }
+        }
       }),
     );
   }
