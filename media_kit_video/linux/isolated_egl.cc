@@ -181,7 +181,8 @@ const gchar* isolated_egl_texture_sharing_problem(EGLDisplay display,
     return "the OpenGL ES context cannot read an EGLImage "
            "(no GL_OES_EGL_image)";
   }
-  // The functions TextureGL calls (texture_gl.cc), as it finds them
+  // The functions TextureGL calls (texture_gl.cc), which epoxy finds through
+  // eglGetProcAddress
   if (eglGetProcAddress("eglCreateImageKHR") == NULL ||
       eglGetProcAddress("eglDestroyImageKHR") == NULL ||
       eglGetProcAddress("glEGLImageTargetTexture2DOES") == NULL) {

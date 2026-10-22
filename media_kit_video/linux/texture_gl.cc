@@ -12,32 +12,6 @@
 #include <epoxy/gl.h>
 #include <epoxy/egl.h>
 
-// EGLImage extension function pointers
-typedef EGLImageKHR (*PFNEGLCREATEIMAGEKHRPROC)(EGLDisplay dpy, EGLContext ctx, EGLenum target, EGLClientBuffer buffer, const EGLint *attrib_list);
-typedef EGLBoolean (*PFNEGLDESTROYIMAGEKHRPROC)(EGLDisplay dpy, EGLImageKHR image);
-typedef void (*PFNGLEGLIMAGETARGETTEXTURE2DOESPROC)(GLenum target, GLeglImageOES image);
-
-// Define the extension functions
-#ifndef eglCreateImageKHR
-static PFNEGLCREATEIMAGEKHRPROC eglCreateImageKHR = NULL;
-#endif
-#ifndef eglDestroyImageKHR
-static PFNEGLDESTROYIMAGEKHRPROC eglDestroyImageKHR = NULL;
-#endif
-#ifndef glEGLImageTargetTexture2DOES
-static PFNGLEGLIMAGETARGETTEXTURE2DOESPROC glEGLImageTargetTexture2DOES = NULL;
-#endif
-
-static void init_egl_image_extensions() {
-  static gboolean initialized = FALSE;
-  if (!initialized) {
-    eglCreateImageKHR = (PFNEGLCREATEIMAGEKHRPROC)eglGetProcAddress("eglCreateImageKHR");
-    eglDestroyImageKHR = (PFNEGLDESTROYIMAGEKHRPROC)eglGetProcAddress("eglDestroyImageKHR");
-    glEGLImageTargetTexture2DOES = (PFNGLEGLIMAGETARGETTEXTURE2DOESPROC)eglGetProcAddress("glEGLImageTargetTexture2DOES");
-    initialized = TRUE;
-  }
-}
-
 // Flutter's texture names are made in Flutter's context on the raster thread,
 // while an output is mostly disposed of on the platform thread, where another
 // context is current (GDK's). A name is deleted in the context that made it: at
@@ -210,7 +184,6 @@ static void texture_gl_class_init(TextureGLClass* klass) {
 }
 
 TextureGL* texture_gl_new(VideoOutput* video_output) {
-  init_egl_image_extensions();
   TextureGL* self = TEXTURE_GL(g_object_new(texture_gl_get_type(), NULL));
   self->video_output = video_output;
   return self;
