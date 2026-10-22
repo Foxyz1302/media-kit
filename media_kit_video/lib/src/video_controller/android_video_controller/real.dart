@@ -7,6 +7,7 @@
 import 'dart:async';
 import 'dart:collection';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -35,7 +36,39 @@ class AndroidVideoController extends PlatformVideoController {
 
   var _disposed = false;
 
+  /// The last video size from [VideoParams], after rotation; [rect] holds the Surface size instead.
+  int? _videoWidth;
+  int? _videoHeight;
+
   NativePlayer get platform => player.platform as NativePlayer;
+
+  /// The Surface size for a [width] x [height] video: the video's own size, scaled down (aspect ratio
+  /// kept) to fit the display's physical resolution in the video's orientation. A 4K video on a phone
+  /// with a 1220 px wide display would otherwise be rendered & composited at 3840x2160 every frame.
+  static ({int width, int height}) surfaceSizeFor(int width, int height) {
+    var longSide = 0.0;
+    var shortSide = 0.0;
+    for (final display in PlatformDispatcher.instance.displays) {
+      longSide = math.max(longSide, math.max(display.size.width, display.size.height));
+      shortSide = math.max(shortSide, math.min(display.size.width, display.size.height));
+    }
+    if (longSide <= 0 || shortSide <= 0) {
+      return (width: width, height: height);
+    }
+    final landscape = width >= height;
+    final scale = math.min(
+      1.0,
+      math.min(
+        (landscape ? longSide : shortSide) / width,
+        (landscape ? shortSide : longSide) / height,
+      ),
+    );
+    if (scale >= 1.0) {
+      return (width: width, height: height);
+    }
+    int even(double v) => math.max(2, (v / 2).round() * 2);
+    return (width: even(width * scale), height: even(height * scale));
+  }
 
   Future<void> setProperty(String key, String value) async {
     await platform.setProperty(key, value, waitForInitialization: false);
@@ -108,25 +141,27 @@ class AndroidVideoController extends PlatformVideoController {
         }
 
         final isZero = width == 0 || height == 0;
-        final isSame = width == rect.value?.width.toInt() &&
-            height == rect.value?.height.toInt();
+        final isSame = width == _videoWidth && height == _videoHeight;
         if (isZero || isSame) {
           return;
         }
+        _videoWidth = width;
+        _videoHeight = height;
 
+        final surface = surfaceSizeFor(width, height);
         final handle = await player.handle;
 
         await _channel.invokeMethod('VideoOutputManager.SetSurfaceSize', {
           'handle': handle.toString(),
-          'width': width.toString(),
-          'height': height.toString(),
+          'width': surface.width.toString(),
+          'height': surface.height.toString(),
         });
 
         rect.value = Rect.fromLTWH(
           0.0,
           0.0,
-          width.toDouble(),
-          height.toDouble(),
+          surface.width.toDouble(),
+          surface.height.toDouble(),
         );
 
         if (!waitUntilFirstFrameRenderedCompleter.isCompleted) {
