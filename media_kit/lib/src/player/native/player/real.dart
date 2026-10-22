@@ -2335,7 +2335,10 @@ class NativePlayer extends PlatformPlayer {
         'dscale': 'bilinear',
         'dither': 'no',
         'cache': 'yes',
-        'cache-on-disk': 'yes',
+        // On Android, mpv's default --demux-cache-dir (inside its config directory) does not exist:
+        // the disk cache always failed with "Failed to create file cache" & mpv fell back to memory.
+        // Keep that memory-only behaviour explicitly instead of writing every stream to flash storage.
+        'cache-on-disk': Platform.isAndroid ? 'no' : 'yes',
         'hr-seek': 'yes',
         'hr-seek-framedrop': 'no',
         'correct-downscaling': 'no',
