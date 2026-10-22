@@ -77,13 +77,11 @@ class AndroidVideoController extends PlatformVideoController {
         // Not doing so causes error "Could not open codec." & video never gets rendered.
         if (configuration.vo == 'mediacodec_embed') 'vid': vidValue,
       });
-      // Instead of seeking to the start (Duration.zero), seek to the current playback position
-      // without jumping the user to the start of the media.
-      final currentPosition = player.state.position;
-      if (_disposed) {
-        return;
-      }
-      await player.seek(currentPosition);
+      // No seek here. Re-initializing --vo makes mpv re-create the video chain & queue its own refresh
+      // seek to the current position. An extra seek on top of it raced that refresh seek: the demuxer
+      // re-read the stream from the start & appended those packets after its read-ahead, so playback
+      // jumped back to 0 seconds later ("Invalid video timestamp X -> 0.000000"). At the end of a file,
+      // the extra seek also cleared mpv's stop_play & aborted on the next file (mpv#13778).
     });
   }
 
