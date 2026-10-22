@@ -180,6 +180,10 @@ class NativePlayer extends PlatformPlayer {
       // Restore original state & reset public [PlayerState] & [PlayerStream] values e.g. width=null, height=null, subtitle=['', ''] etc.
       await stop(open: true, synchronized: false);
 
+      // mpv rejects seek until the new file is loaded; [seek] keeps requests until then.
+      _awaitingFile = playlist.isNotEmpty && index >= 0;
+      _pendingSeek = null;
+
       // Enter paused state.
       await _setPropertyFlag('pause', true);
 
@@ -246,6 +250,10 @@ class NativePlayer extends PlatformPlayer {
       isShuffleEnabled = false;
       isPlayingStateChangeAllowed = false;
       isBufferingStateChangeAllowed = false;
+      if (!open) {
+        _awaitingFile = false;
+        _pendingSeek = null;
+      }
 
       final commands = [
         ['stop'],
@@ -694,11 +702,17 @@ class NativePlayer extends PlatformPlayer {
       await waitForPlayerInitialization;
       await waitForVideoControllerInitializationIfAttached;
 
-      await _command([
-        'seek',
-        (duration.inMilliseconds / 1000).toStringAsFixed(4),
-        'absolute',
-      ]);
+      if (_awaitingFile) {
+        // Right after [open], mpv has no file to seek in yet & rejects the command. Keep the request &
+        // apply it on MPV_EVENT_FILE_LOADED.
+        _pendingSeek = duration;
+      } else {
+        await _command([
+          'seek',
+          (duration.inMilliseconds / 1000).toStringAsFixed(4),
+          'absolute',
+        ]);
+      }
 
       // It is self explanatory that PlayerState.completed & PlayerStream.completed must enter the false state if seek is called. Typically after EOF.
       // https://github.com/media-kit/media-kit/issues/221
@@ -1479,6 +1493,27 @@ class NativePlayer extends PlatformPlayer {
       'event:${event.ref.event_id} ${event.ref.data.cast<Uint8>()}',
     );
 
+    if (event.ref.event_id == generated.mpv_event_id.MPV_EVENT_FILE_LOADED) {
+      _awaitingFile = false;
+      final pending = _pendingSeek;
+      _pendingSeek = null;
+      if (pending != null) {
+        // Not awaited: its reply arrives through this same, serialized event loop.
+        unawaited(_command([
+          'seek',
+          (pending.inMilliseconds / 1000).toStringAsFixed(4),
+          'absolute',
+        ]));
+      }
+    }
+    if (event.ref.event_id == generated.mpv_event_id.MPV_EVENT_END_FILE) {
+      final reason = event.ref.data.cast<generated.mpv_event_end_file>().ref.reason;
+      if (reason == generated.mpv_end_file_reason.MPV_END_FILE_REASON_ERROR) {
+        // The file being opened failed to load: there is nothing to seek in.
+        _awaitingFile = false;
+        _pendingSeek = null;
+      }
+    }
     if (event.ref.event_id == generated.mpv_event_id.MPV_EVENT_START_FILE) {
       if (isPlayingStateChangeAllowed) {
         state = state.copyWith(playing: true, completed: false);
@@ -2632,6 +2667,12 @@ class NativePlayer extends PlatformPlayer {
 
   /// A flag to keep track of [setShuffle] calls.
   bool isShuffleEnabled = false;
+
+  /// Whether [open] started loading a file that mpv hasn't reported as loaded yet. mpv rejects `seek`
+  /// until then, so [seek] stores the last request in [_pendingSeek] & MPV_EVENT_FILE_LOADED applies it.
+  bool _awaitingFile = false;
+  Duration? _pendingSeek;
+
 
   /// A flag to prevent changes to [state.playing] due to `loadfile` commands in [open].
   ///
