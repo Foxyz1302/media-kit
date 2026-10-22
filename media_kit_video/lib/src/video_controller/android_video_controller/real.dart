@@ -152,7 +152,9 @@ class AndroidVideoController extends PlatformVideoController {
         debugPrint('media_kit: Emulator detected.');
         debugPrint('media_kit: Enforcing S/W rendering.');
       }
-      return hw ? 'auto-safe' : 'no';
+      // auto-safe resolves to mediacodec-copy, which copies every decoded frame from the decoder
+      // to system memory and uploads it again. Prefer zero-copy mediacodec & keep copy as fallback.
+      return hw ? 'mediacodec,mediacodec-copy' : 'no';
     }
 
     // Update [configuration] to have default values.
