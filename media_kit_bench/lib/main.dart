@@ -41,6 +41,9 @@ const _configsDefine = String.fromEnvironment('BENCH_CONFIGS');
 const _passesDefine = String.fromEnvironment('BENCH_PASSES');
 const _mpvLogDefine = String.fromEnvironment('BENCH_MPV_LOG', defaultValue: 'warn');
 const _trace = bool.fromEnvironment('BENCH_TRACE');
+// BENCH_LINK_TEST=<clip>: before the matrix, time one full GET of that clip so network limits of the
+// adb-reverse link can be told apart from decode or render limits.
+const _linkTestClip = String.fromEnvironment('BENCH_LINK_TEST');
 const _version = 3;
 
 List<String> _csv(String s) => [for (final e in s.split(',')) if (e.trim().isNotEmpty) e.trim()];
@@ -199,6 +202,10 @@ class _BenchPageState extends State<BenchPage> {
       'clockSkewUs': lastVsync == null ? null : developer.Timeline.now - lastVsync,
       'epochMs': DateTime.now().millisecondsSinceEpoch,
     });
+    if (_linkTestClip.isNotEmpty) {
+      if (mounted) setState(() => _status = 'link test · $_linkTestClip');
+      await _post(await _linkTest(_linkTestClip));
+    }
     var nativeId = 1000;
     for (final pass in _passes) {
       await _setOrientation(pass);
@@ -235,6 +242,32 @@ class _BenchPageState extends State<BenchPage> {
     await _setOrientation('portrait');
     await _post({'type': 'done', 'version': _version, 'epochMs': DateTime.now().millisecondsSinceEpoch});
     if (mounted) setState(() => _status = 'done');
+  }
+
+  Future<Map<String, dynamic>> _linkTest(String clip) async {
+    final sw = Stopwatch()..start();
+    var bytes = 0;
+    String? error;
+    try {
+      final req = await _http.getUrl(Uri.parse('$_host/clips/$clip'));
+      final resp = await req.close();
+      await for (final chunk in resp) {
+        bytes += chunk.length;
+      }
+    } catch (e) {
+      error = '$e';
+    }
+    final seconds = sw.elapsedMilliseconds / 1000;
+    return {
+      'type': 'link',
+      'version': _version,
+      'clip': clip,
+      'bytes': bytes,
+      'ms': sw.elapsedMilliseconds,
+      'MBps': seconds > 0 ? _r2(bytes / 1e6 / seconds) : null,
+      'Mbps': seconds > 0 ? _r2(bytes * 8 / 1e6 / seconds) : null,
+      'error': error,
+    };
   }
 
   VideoControllerConfiguration _videoConfig(BenchConfig cfg) => switch (cfg) {

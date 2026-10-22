@@ -36,7 +36,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_error(404)
             return
         size = os.path.getsize(file_path)
-        ctype = 'video/webm' if name.endswith('.webm') else 'video/mp4'
+        ctype = {'.webm': 'video/webm', '.ts': 'video/mp2t'}.get(os.path.splitext(name)[1], 'video/mp4')
         start, end, status = 0, size - 1, 200
         rng = self.headers.get('Range')
         if rng:
