@@ -414,6 +414,17 @@ class PlayerConfiguration {
   /// Default: `null`.
   final String title;
 
+  /// Sets the application name the native backend reports to the system's audio server, i.e. mpv's
+  /// [`--audio-client-name`](https://mpv.io/manual/stable/#options-audio-client-name).
+  /// PulseAudio & PipeWire show audio streams under this name, and per-application audio capture
+  /// (e.g. sharing an application's window together with its audio) matches applications by it.
+  ///
+  /// An empty string keeps mpv's own default, `mpv`.
+  ///
+  /// Default: the name of the running executable on Windows, GNU/Linux & macOS, so the audio belongs
+  /// to the application rather than to `mpv`; mpv's default elsewhere.
+  final String? audioClientName;
+
   /// Optional callback invoked when the internals of the [Player] are initialized & ready for playback.
   ///
   /// Default: `null`.
@@ -487,6 +498,7 @@ class PlayerConfiguration {
     this.osc = false,
     this.pitch = false,
     this.title = 'package:media_kit',
+    this.audioClientName,
     this.ready,
     this.muted = false,
     this.async = true,
