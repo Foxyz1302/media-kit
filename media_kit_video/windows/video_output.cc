@@ -193,9 +193,11 @@ VideoOutput::~VideoOutput() {
   promise.get_future().wait();
   texture_id_ = 0;
 
-  thread_pool_ref_->Post([render_context = render_context_]() {
-    mpv_render_context_free(render_context);
-  });
+  thread_pool_ref_
+      ->Post([render_context = render_context_]() {
+        mpv_render_context_free(render_context);
+      })
+      .wait();
 }
 
 void VideoOutput::NotifyRender() {
