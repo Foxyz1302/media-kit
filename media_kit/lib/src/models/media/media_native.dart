@@ -172,11 +172,10 @@ class Media extends Playable {
     switch (parser.type) {
       case URIType.file:
         {
-          var path = parser.file!.path;
-          if (Platform.isWindows) {
-            path = path.replaceAll(RegExp(r'^[\/\\]+[\?\\]+[\/\\]+'), '');
-            path = path.replaceAll('/', '\\');
-            path = path.toLowerCase();
+          final path = parser.file!.path;
+          if (Platform.isWindows &&
+              path.startsWith(RegExp(r'//\?/[A-Za-z]:/'))) {
+            return path.substring(4);
           }
           return path;
         }
