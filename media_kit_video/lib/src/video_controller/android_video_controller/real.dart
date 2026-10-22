@@ -40,6 +40,13 @@ class AndroidVideoController extends PlatformVideoController {
   int? _videoWidth;
   int? _videoHeight;
 
+  /// The --wid the video output is attached to, so the same Surface is never attached twice.
+  int? _attachedWid;
+
+  /// Non-null while [_onPreloaded] waits for the Surface it requested; [widListener] leaves that attach
+  /// to it.
+  Completer<void>? _surfaceReady;
+
   NativePlayer get platform => player.platform as NativePlayer;
 
   /// The Surface size for a [width] x [height] video: the video's own size, scaled down (aspect ratio
@@ -86,6 +93,10 @@ class AndroidVideoController extends PlatformVideoController {
       if (_disposed) {
         return;
       }
+      final current = wid.value;
+      if (_surfaceReady != null || (current != null && current != 0 && current == _attachedWid)) {
+        return;
+      }
       final width = rect.value?.width.toInt() ?? 1;
       final height = rect.value?.height.toInt() ?? 1;
       final androidSurfaceSizeValue = [width, height].join('x');
@@ -110,12 +121,94 @@ class AndroidVideoController extends PlatformVideoController {
         // Not doing so causes error "Could not open codec." & video never gets rendered.
         if (configuration.vo == 'mediacodec_embed') 'vid': vidValue,
       });
+      _attachedWid = widValue == '0' ? null : current;
       // No seek here. Re-initializing --vo makes mpv re-create the video chain & queue its own refresh
       // seek to the current position. An extra seek on top of it raced that refresh seek: the demuxer
       // re-read the stream from the start & appended those packets after its read-ahead, so playback
       // jumped back to 0 seconds later ("Invalid video timestamp X -> 0.000000"). At the end of a file,
       // the extra seek also cleared mpv's stop_play & aborted on the next file (mpv#13778).
     });
+  }
+
+  /// Runs inside mpv's on_preloaded hook (the file is open, no decoders exist yet) & attaches the
+  /// Surface for the video's container size before mpv creates the decoders. Otherwise decoding starts
+  /// on vo=null & the attach after the first decoded frame re-creates the video chain with a refresh
+  /// seek, which lands on the first keyframe when that comes late (media-kit#1417). The player's event
+  /// loop is blocked until this returns, so only synchronous mpv calls are made here.
+  Future<void> _onPreloaded() async {
+    if (_disposed) {
+      return;
+    }
+    final size = await _demuxVideoSize();
+    if (size == null || _disposed) {
+      return;
+    }
+    final surface = surfaceSizeFor(size.width, size.height);
+    final current = rect.value;
+    final sameSurface = current != null &&
+        current.width.toInt() == surface.width &&
+        current.height.toInt() == surface.height;
+    if (!sameSurface || wid.value == null || wid.value == 0) {
+      final ready = _surfaceReady = Completer<void>();
+      try {
+        final handle = await player.handle;
+        await _channel.invokeMethod('VideoOutputManager.SetSurfaceSize', {
+          'handle': handle.toString(),
+          'width': surface.width.toString(),
+          'height': surface.height.toString(),
+        });
+        // VideoOutput.Resize (the new Surface) completes this.
+        await ready.future.timeout(const Duration(seconds: 2), onTimeout: () {});
+      } finally {
+        _surfaceReady = null;
+      }
+    }
+    final target = wid.value;
+    if (_disposed || target == null || target == 0) {
+      return;
+    }
+    _videoWidth = size.width;
+    _videoHeight = size.height;
+    if (target == _attachedWid) {
+      return;
+    }
+    final attached = rect.value;
+    platform.setPropertySync('vo', 'null');
+    platform.setPropertySync(
+      'android-surface-size',
+      '${attached?.width.toInt() ?? surface.width}x${attached?.height.toInt() ?? surface.height}',
+    );
+    platform.setPropertySync('wid', target.toString());
+    platform.setPropertySync('vo', configuration.vo!);
+    _attachedWid = target;
+  }
+
+  /// The display size of the first video track, from the container (`demux-w`/`demux-h`, pixel aspect
+  /// ratio & rotation applied), or null when there is none.
+  Future<({int width, int height})?> _demuxVideoSize() async {
+    Future<String> get(String property) =>
+        platform.getProperty(property, waitForInitialization: false);
+    final count = int.tryParse(await get('track-list/count')) ?? 0;
+    for (var i = 0; i < count; i++) {
+      if (await get('track-list/$i/type') != 'video' ||
+          await get('track-list/$i/albumart') == 'yes') {
+        continue;
+      }
+      var width = int.tryParse(await get('track-list/$i/demux-w')) ?? 0;
+      final height = int.tryParse(await get('track-list/$i/demux-h')) ?? 0;
+      if (width <= 0 || height <= 0) {
+        return null;
+      }
+      final par = double.tryParse(await get('track-list/$i/demux-par'));
+      if (par != null && par > 0 && (par - 1).abs() > 0.01) {
+        width = (width * par).round();
+      }
+      final rotation = int.tryParse(await get('track-list/$i/demux-rotation')) ?? 0;
+      return rotation == 90 || rotation == 270
+          ? (width: height, height: width)
+          : (width: width, height: height);
+    }
+    return null;
   }
 
   /// [StreamSubscription] for listening to video [Rect].
@@ -141,32 +234,36 @@ class AndroidVideoController extends PlatformVideoController {
         }
 
         final isZero = width == 0 || height == 0;
-        final isSame = width == _videoWidth && height == _videoHeight;
-        if (isZero || isSame) {
+        if (isZero) {
           return;
         }
-        _videoWidth = width;
-        _videoHeight = height;
+        // Same size: either nothing changed, or _onPreloaded already attached a Surface for it.
+        final isSame = width == _videoWidth && height == _videoHeight;
+        if (!isSame) {
+          _videoWidth = width;
+          _videoHeight = height;
 
-        final surface = surfaceSizeFor(width, height);
-        final handle = await player.handle;
+          final surface = surfaceSizeFor(width, height);
+          final handle = await player.handle;
 
-        await _channel.invokeMethod('VideoOutputManager.SetSurfaceSize', {
-          'handle': handle.toString(),
-          'width': surface.width.toString(),
-          'height': surface.height.toString(),
-        });
+          await _channel.invokeMethod('VideoOutputManager.SetSurfaceSize', {
+            'handle': handle.toString(),
+            'width': surface.width.toString(),
+            'height': surface.height.toString(),
+          });
 
-        rect.value = Rect.fromLTWH(
-          0.0,
-          0.0,
-          surface.width.toDouble(),
-          surface.height.toDouble(),
-        );
-
-        if (!waitUntilFirstFrameRenderedCompleter.isCompleted) {
-          waitUntilFirstFrameRenderedCompleter.complete();
+          rect.value = Rect.fromLTWH(
+            0.0,
+            0.0,
+            surface.width.toDouble(),
+            surface.height.toDouble(),
+          );
         }
+
+        if (waitUntilFirstFrameRenderedCompleter.isCompleted) {
+          return;
+        }
+        waitUntilFirstFrameRenderedCompleter.complete();
 
         if (configuration.vo == 'mediacodec_embed') {
           final hwdec = await platform.getProperty(
@@ -235,6 +332,7 @@ class AndroidVideoController extends PlatformVideoController {
 
     // Register [_dispose] for execution upon [Player.dispose].
     player.platform?.release.add(controller._dispose);
+    controller.platform.onPreloadedHooks.add(controller._onPreloaded);
 
     // Store the [VideoController] in the [_controllers].
     _controllers[handle] = controller;
@@ -280,6 +378,7 @@ class AndroidVideoController extends PlatformVideoController {
     super.dispose();
     wid.dispose();
     wid.removeListener(widListener);
+    platform.onPreloadedHooks.remove(_onPreloaded);
     await videoParamsSubscription?.cancel();
     final handle = await player.handle;
     _controllers.remove(handle);
@@ -314,6 +413,10 @@ class AndroidVideoController extends PlatformVideoController {
               _controllers[handle]?.rect.value = rect;
               _controllers[handle]?.id.value = id;
               _controllers[handle]?.wid.value = wid;
+              final ready = _controllers[handle]?._surfaceReady;
+              if (ready != null && !ready.isCompleted) {
+                ready.complete();
+              }
               break;
             }
           case 'VideoOutput.WaitUntilFirstFrameRenderedNotify':

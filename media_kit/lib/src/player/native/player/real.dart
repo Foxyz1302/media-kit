@@ -1211,6 +1211,25 @@ class NativePlayer extends PlatformPlayer {
     await _setPropertyString(property, value);
   }
 
+  /// Sets [property] synchronously. Use this inside [onPreloadedHooks]: mpv waits for the hook, & the
+  /// asynchronous API would wait for a reply event that the blocked event loop cannot deliver.
+  void setPropertySync(String property, String value) {
+    if (disposed) {
+      throw AssertionError('[Player] has been disposed');
+    }
+    final name = property.toNativeUtf8();
+    final data = value.toNativeUtf8();
+    try {
+      _logError(
+        mpv.mpv_set_property_string(ctx, name.cast(), data.cast()),
+        'setPropertySync($property, $value)',
+      );
+    } finally {
+      calloc.free(name);
+      calloc.free(data);
+    }
+  }
+
   /// Retrieves the value of a property from the internal libmpv instance of this [Player].
   /// Please use this method only if you know what you are doing, existing methods in [Player] implementation are suited for the most use cases.
   ///
@@ -2238,6 +2257,17 @@ class NativePlayer extends PlatformPlayer {
         // --------------------------------------------------
         mpv.mpv_hook_continue(ctx, prop.ref.id);
       }
+      if (prop.ref.name.cast<Utf8>().toDartString() == 'on_preloaded') {
+        for (final hook in onPreloadedHooks) {
+          try {
+            await hook.call();
+          } catch (exception, stacktrace) {
+            print(exception);
+            print(stacktrace);
+          }
+        }
+        mpv.mpv_hook_continue(ctx, prop.ref.id);
+      }
       if (prop.ref.name.cast<Utf8>().toDartString() == 'on_unload') {
         // --------------------------------------------------
         for (final hook in onUnloadHooks) {
@@ -2486,6 +2516,10 @@ class NativePlayer extends PlatformPlayer {
       mpv.mpv_hook_add(ctx, 0, unload.cast(), 0);
       calloc.free(load);
       calloc.free(unload);
+      // [onPreloadedHooks]: e.g. attaching a video output before the decoders are created.
+      final preloaded = 'on_preloaded'.toNativeUtf8();
+      mpv.mpv_hook_add(ctx, 0, preloaded.cast(), 0);
+      calloc.free(preloaded);
 
       await NativeReferenceHolder.instance.add(ctx);
     });
@@ -2673,6 +2707,10 @@ class NativePlayer extends PlatformPlayer {
   bool _awaitingFile = false;
   Duration? _pendingSeek;
 
+  /// Hooks run inside mpv's `on_preloaded` hook: the demuxer is open & `track-list` is known, but no
+  /// decoders exist yet. mpv waits for them & this player's event loop is blocked meanwhile, so they
+  /// must only make synchronous mpv calls (see [setPropertySync]).
+  final List<Future<void> Function()> onPreloadedHooks = [];
 
   /// A flag to prevent changes to [state.playing] due to `loadfile` commands in [open].
   ///
