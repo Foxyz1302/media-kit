@@ -432,21 +432,23 @@ guint8* video_output_get_pixel_buffer(VideoOutput* self) {
   return self->pixel_buffer;
 }
 
-gint64 video_output_get_width(VideoOutput* self) {
-  // Fixed width.
-  if (self->width) {
-    return self->width;
+// The display size of the video from mpv's video-out-params, rotation
+// applied; 0 x 0 while there is none (before the first frame, after the end).
+// A failed read hands over nothing and leaves |params| as it was; a
+// successful one hands over the node whatever its format.
+static void video_output_get_video_size(VideoOutput* self,
+                                        gint64* width,
+                                        gint64* height) {
+  *width = 0;
+  *height = 0;
+  mpv_node params;
+  if (mpv_get_property(self->handle, "video-out-params", MPV_FORMAT_NODE,
+                       &params) < 0) {
+    return;
   }
 
-  // Video resolution dependent width.
-  gint64 width = 0;
-  gint64 height = 0;
-
-  mpv_node params;
-  mpv_get_property(self->handle, "video-out-params", MPV_FORMAT_NODE, &params);
-
   int64_t dw = 0, dh = 0, rotate = 0;
-  if (params.format == MPV_FORMAT_NODE_MAP) {
+  if (params.format == MPV_FORMAT_NODE_MAP && params.u.list != NULL) {
     for (int32_t i = 0; i < params.u.list->num; i++) {
       char* key = params.u.list->keys[i];
       auto value = params.u.list->values[i];
@@ -462,11 +464,23 @@ gint64 video_output_get_width(VideoOutput* self) {
         }
       }
     }
-    mpv_free_node_contents(&params);
+  }
+  mpv_free_node_contents(&params);
+
+  *width = rotate == 0 || rotate == 180 ? dw : dh;
+  *height = rotate == 0 || rotate == 180 ? dh : dw;
+}
+
+gint64 video_output_get_width(VideoOutput* self) {
+  // Fixed width.
+  if (self->width) {
+    return self->width;
   }
 
-  width = rotate == 0 || rotate == 180 ? dw : dh;
-  height = rotate == 0 || rotate == 180 ? dh : dw;
+  // Video resolution dependent width.
+  gint64 width = 0;
+  gint64 height = 0;
+  video_output_get_video_size(self, &width, &height);
 
   if (self->texture_sw != NULL) {
     // Make sure |width| & |height| fit between |SW_RENDERING_MAX_WIDTH| &
@@ -491,32 +505,7 @@ gint64 video_output_get_height(VideoOutput* self) {
   // Video resolution dependent height.
   gint64 width = 0;
   gint64 height = 0;
-
-  mpv_node params;
-  mpv_get_property(self->handle, "video-out-params", MPV_FORMAT_NODE, &params);
-
-  int64_t dw = 0, dh = 0, rotate = 0;
-  if (params.format == MPV_FORMAT_NODE_MAP) {
-    for (int32_t i = 0; i < params.u.list->num; i++) {
-      char* key = params.u.list->keys[i];
-      auto value = params.u.list->values[i];
-      if (value.format == MPV_FORMAT_INT64) {
-        if (strcmp(key, "dw") == 0) {
-          dw = value.u.int64;
-        }
-        if (strcmp(key, "dh") == 0) {
-          dh = value.u.int64;
-        }
-        if (strcmp(key, "rotate") == 0) {
-          rotate = value.u.int64;
-        }
-      }
-    }
-    mpv_free_node_contents(&params);
-  }
-
-  width = rotate == 0 || rotate == 180 ? dw : dh;
-  height = rotate == 0 || rotate == 180 ? dh : dw;
+  video_output_get_video_size(self, &width, &height);
 
   if (self->texture_sw != NULL) {
     // Make sure |width| & |height| fit between |SW_RENDERING_MAX_WIDTH| &
