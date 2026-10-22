@@ -190,8 +190,14 @@ void MediaKitVideoPlugin::HandleMethodCall(
     auto handle =
         std::get<std::string>(arguments[flutter::EncodableValue("handle")]);
     auto handle_value = static_cast<int64_t>(std::stoll(handle.c_str()));
-    video_output_manager_->Dispose(handle_value);
-    result->Success(flutter::EncodableValue(std::monostate{}));
+    auto shared_result =
+        std::shared_ptr<flutter::MethodResult<flutter::EncodableValue>>(
+            std::move(result));
+    video_output_manager_->Dispose(handle_value, [this, shared_result]() {
+      RunOnMainThread([shared_result]() {
+        shared_result->Success(flutter::EncodableValue(std::monostate{}));
+      });
+    });
   } else if (method_call.method_name().compare("VideoOutputManager.SetSize") ==
              0) {
     auto arguments = std::get<flutter::EncodableMap>(*method_call.arguments());
