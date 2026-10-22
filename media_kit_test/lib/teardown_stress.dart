@@ -21,6 +21,9 @@
 ///   STRESS_SIZE             bench: fixed output size, WIDTHxHEIGHT
 ///   STRESS_MPV_LOG          mpv messages logged from this level (error)
 ///   STRESS_HWDEC            hwdec of the video controllers (auto)
+///   STRESS_SIZES            setSize choices: video or WIDTHxHEIGHT, comma
+///                           separated (video,640x360,1280x720,1920x1080,
+///                           2560x1440)
 ///
 /// Exit status: 0 when every iteration ended, 1 on errors, 2 without clips,
 /// 3 when no iteration ended for 60 s; a crash leaves the signal's status.
@@ -29,7 +32,6 @@ import 'dart:async';
 import 'dart:ffi' show DynamicLibrary, DynamicLibraryExtension, Int32, Void;
 import 'dart:io';
 import 'dart:math';
-import 'dart:ui' show FrameTiming;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
@@ -60,12 +62,14 @@ final _mpvLogLevel = MPVLogLevel.values.firstWhere(
   orElse: () => MPVLogLevel.error,
 );
 
-const _outputSizes = <Size?>[
-  null,
-  Size(640, 360),
-  Size(1280, 720),
-  Size(1920, 1080),
-  Size(2560, 1440),
+final _outputSizes = [
+  for (final size in (_environment['STRESS_SIZES'] ??
+          'video,640x360,1280x720,1920x1080,2560x1440')
+      .split(','))
+    if (size.split('x') case [final width, final height])
+      Size(double.parse(width), double.parse(height))
+    else
+      null,
 ];
 
 void _log(String message) => stdout.writeln('stress: $message');

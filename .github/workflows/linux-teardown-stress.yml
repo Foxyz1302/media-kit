@@ -1,0 +1,108 @@
+name: Linux teardown stress
+
+on:
+  push:
+    branches:
+      - linux-render
+  workflow_dispatch:
+
+jobs:
+  stress:
+    name: Teardown stress, ${{ matrix.native }} native code (Xvfb, llvmpipe, hwdec=no)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    continue-on-error: ${{ matrix.native == 'base' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        native: [branch, base]
+    defaults:
+      run:
+        shell: bash
+        working-directory: media_kit_test
+    env:
+      LIBGL_ALWAYS_SOFTWARE: "1"
+      STRESS_HWDEC: "no"
+      STRESS_LANES: "5"
+      STRESS_ITERATIONS: "25"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Native code of integration 9c0eef46, before P1-L1
+        if: matrix.native == 'base'
+        run: git checkout 9c0eef46 -- ../media_kit_video/linux
+      - run: sudo apt-get update
+      - run: >
+          sudo apt-get install -y clang cmake ninja-build pkg-config
+          libgtk-3-dev libmpv-dev libepoxy-dev ffmpeg xvfb xauth gdb
+          libgl1-mesa-dri libegl-mesa0
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.47.7"
+          channel: "stable"
+          cache: true
+      - run: flutter pub get
+      - name: Clips
+        run: |
+          mkdir -p "$RUNNER_TEMP/clips"
+          for size in 640x360 854x480; do
+            ffmpeg -hide_banner -loglevel error -f lavfi \
+              -i "testsrc2=size=$size:rate=30" -t 20 -c:v libx264 \
+              -preset ultrafast -pix_fmt yuv420p -g 30 \
+              "$RUNNER_TEMP/clips/$size.mp4"
+          done
+      - run: flutter build linux --debug -t lib/teardown_stress.dart
+      - name: Isolated EGL context test
+        if: matrix.native == 'branch'
+        working-directory: media_kit_video/linux
+        run: |
+          g++ -std=c++17 -o "$RUNNER_TEMP/isolated_egl_test" \
+            test/isolated_egl_test.cc isolated_egl.cc \
+            $(pkg-config --cflags --libs gtk+-3.0 epoxy)
+          GDK_BACKEND=x11 xvfb-run -a "$RUNNER_TEMP/isolated_egl_test"
+      - name: Stress, 3 runs of 5 lanes x 25 iterations
+        run: |
+          sudo sysctl -w kernel.core_pattern="$RUNNER_TEMP/core.%p"
+          ulimit -c unlimited
+          export STRESS_CLIPS="$RUNNER_TEMP/clips/640x360.mp4,$RUNNER_TEMP/clips/854x480.mp4"
+          bundle=build/linux/x64/debug/bundle/media_kit_test
+          failed=0
+          for run in 1 2 3; do
+            log="$RUNNER_TEMP/stress-$run.log"
+            STRESS_SEED=$run timeout -s KILL 900 \
+              xvfb-run -a -s "-screen 0 1280x720x24" "$bundle" > "$log" 2>&1
+            status=$?
+            echo "::group::run $run: exit $status"
+            grep -E "^stress: (mode|probe|PASS|FAIL|HANG|exit)" "$log"
+            grep -oE "media_kit: (VideoOutput|TextureGL): [^(]*" "$log" | sort | uniq -c
+            grep -oE "hwdec=[a-z0-9-]*" "$log" | sort | uniq -c
+            if [ $status -ne 0 ]; then
+              tail -30 "$log"
+            fi
+            echo "::endgroup::"
+            if ! grep -q "H/W rendering with isolated EGL context" "$log"; then
+              echo "::error::run $run never rendered through the isolated EGL context"
+              failed=1
+            fi
+            if [ $status -ne 0 ]; then
+              echo "::error::run $run exited with $status"
+              failed=1
+              for core in "$RUNNER_TEMP"/core.*; do
+                [ -e "$core" ] || continue
+                echo "::group::backtraces of $core"
+                gdb -q -batch -ex "thread apply all bt 24" "$bundle" "$core" 2>/dev/null |
+                  grep -E "^Thread|^#" |
+                  grep -B1 -A24 -E "media_kit_video|mpv_render|texture_gl|video_output|io.flutter" |
+                  head -200
+                echo "::endgroup::"
+                rm -f "$core"
+              done
+            fi
+          done
+          exit $failed
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: stress-logs-${{ matrix.native }}
+          path: ${{ runner.temp }}/stress-*.log
