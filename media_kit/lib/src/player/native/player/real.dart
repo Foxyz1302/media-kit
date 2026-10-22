@@ -2356,7 +2356,12 @@ class NativePlayer extends PlatformPlayer {
       };
       // Other properties based on [PlayerConfiguration].
       properties.addAll({
-        if (!configuration.osc) ...{'osc': 'no', 'osd-level': '0'},
+        if (!configuration.osc) ...{
+          // libmpv builds without Lua (e.g. Android) have no osc option; setting it there only logs
+          // "property not found".
+          if (_hasOption('osc')) 'osc': 'no',
+          'osd-level': '0',
+        },
         'title': configuration.title,
         'demuxer-max-bytes': configuration.bufferSize.toString(),
         'demuxer-max-back-bytes': configuration.bufferSize.toString(),
@@ -2521,6 +2526,21 @@ class NativePlayer extends PlatformPlayer {
     final ptr = calloc<Int64>(1)..value = value;
     await _setProperty(name, generated.mpv_format.MPV_FORMAT_INT64, ptr.cast());
     calloc.free(ptr);
+  }
+
+  /// Whether the libmpv build has the option [name]; some options only exist in certain builds.
+  bool _hasOption(String name) {
+    final property = 'option-info/$name/name'.toNativeUtf8();
+    try {
+      final value = mpv.mpv_get_property_string(ctx, property.cast());
+      if (value == nullptr) {
+        return false;
+      }
+      mpv.mpv_free(value.cast());
+      return true;
+    } finally {
+      calloc.free(property);
+    }
   }
 
   Future<void> _setPropertyString(String name, String value) async {
