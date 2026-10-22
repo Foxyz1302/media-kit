@@ -52,6 +52,10 @@ static void video_output_dispose(GObject* object) {
   if (self->texture_gl) {
     fl_texture_registrar_unregister_texture(self->texture_registrar,
                                             FL_TEXTURE(self->texture_gl));
+    // The raster thread may be rendering into the texture with mpv's render
+    // context and the isolated EGL context current; once this returns, it
+    // never touches either again, so the context is current nowhere else
+    texture_gl_release(self->texture_gl);
     
     // Free mpv_render_context with our own isolated EGL context current,
     // whatever this thread had current (GDK's GL context on the platform
@@ -80,7 +84,15 @@ static void video_output_dispose(GObject* object) {
       self->egl_context = EGL_NO_CONTEXT;
     }
     
-    g_object_unref(self->texture_gl);
+    // A populate that looked the texture up before it was unregistered may
+    // not have started yet; the texture outlives it (texture_gl_release)
+    g_timeout_add_seconds(
+        1,
+        [](gpointer data) -> gboolean {
+          g_object_unref(data);
+          return G_SOURCE_REMOVE;
+        },
+        self->texture_gl);
   }
   // S/W
   if (self->texture_sw) {

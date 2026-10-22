@@ -100,6 +100,7 @@ static gboolean texture_gl_can_blit() {
 
 struct _TextureGL {
   FlTextureGL parent_instance;
+  GMutex mutex;              // held by populate, see texture_gl_release
   guint32 name;              // Flutter's texture name
   EGLContext name_context;   // The EGL context |name| was made in
   guint32 fbo;               // mpv's FBO (render target)
@@ -109,12 +110,14 @@ struct _TextureGL {
   EGLImageKHR egl_image;     // EGLImage for sharing between contexts
   guint32 current_width;
   guint32 current_height;
-  VideoOutput* video_output;
+  gboolean egl_error_logged;
+  VideoOutput* video_output; // NULL once released
 };
 
 G_DEFINE_TYPE(TextureGL, texture_gl, fl_texture_gl_get_type())
 
 static void texture_gl_init(TextureGL* self) {
+  g_mutex_init(&self->mutex);
   self->name = 0;
   self->name_context = EGL_NO_CONTEXT;
   self->fbo = 0;
@@ -124,31 +127,25 @@ static void texture_gl_init(TextureGL* self) {
   self->egl_image = EGL_NO_IMAGE_KHR;
   self->current_width = 1;
   self->current_height = 1;
+  self->egl_error_logged = FALSE;
   self->video_output = NULL;
 }
 
-static void texture_gl_dispose(GObject* object) {
-  TextureGL* self = TEXTURE_GL(object);
+// mpv's FBO and texture, the export texture and its FBO, and the EGLImage,
+// made in mpv's isolated context
+static void texture_gl_delete_mpv_resources(TextureGL* self) {
   VideoOutput* video_output = self->video_output;
-  
-  // Clean up Flutter's texture (in Flutter's context)
-  texture_gl_delete_name(self->name_context, self->name);
-  self->name = 0;
-  
-  // Clean up EGLImage
-  if (self->egl_image != EGL_NO_IMAGE_KHR && video_output != NULL) {
-    EGLDisplay egl_display = video_output_get_egl_display(video_output);
+  if (video_output == NULL) {
+    return;
+  }
+  EGLDisplay egl_display = video_output_get_egl_display(video_output);
+  if (self->egl_image != EGL_NO_IMAGE_KHR) {
     eglDestroyImageKHR(egl_display, self->egl_image);
     self->egl_image = EGL_NO_IMAGE_KHR;
   }
-  
-  // Clean up mpv's OpenGL resources (in mpv's isolated context)
-  if (video_output != NULL && (self->mpv_texture != 0 || self->fbo != 0 ||
-                               self->export_texture != 0 ||
-                               self->export_fbo != 0)) {
-    EGLDisplay egl_display = video_output_get_egl_display(video_output);
+  if (self->mpv_texture != 0 || self->fbo != 0 || self->export_texture != 0 ||
+      self->export_fbo != 0) {
     EGLContext egl_context = video_output_get_egl_context(video_output);
-    
     if (egl_context != EGL_NO_CONTEXT) {
       // Whatever this thread had current (GDK's GL context on the platform
       // thread) is put aside, then comes back
@@ -167,6 +164,11 @@ static void texture_gl_dispose(GObject* object) {
         if (self->export_fbo != 0) {
           glDeleteFramebuffers(1, &self->export_fbo);
         }
+      } else {
+        g_printerr(
+            "media_kit: TextureGL: mpv's EGL context could not be made current "
+            "to free the texture. Error: 0x%x\n",
+            error);
       }
       isolated_egl_leave(egl_display, &saved);
     }
@@ -176,6 +178,18 @@ static void texture_gl_dispose(GObject* object) {
     self->export_texture = 0;
     self->export_fbo = 0;
   }
+}
+
+static void texture_gl_dispose(GObject* object) {
+  TextureGL* self = TEXTURE_GL(object);
+  
+  // Clean up Flutter's texture (in Flutter's context)
+  texture_gl_delete_name(self->name_context, self->name);
+  self->name = 0;
+  
+  // Clean up mpv's OpenGL resources (in mpv's isolated context), unless
+  // texture_gl_release did
+  texture_gl_delete_mpv_resources(self);
   
   self->current_width = 1;
   self->current_height = 1;
@@ -183,9 +197,16 @@ static void texture_gl_dispose(GObject* object) {
   G_OBJECT_CLASS(texture_gl_parent_class)->dispose(object);
 }
 
+static void texture_gl_finalize(GObject* object) {
+  TextureGL* self = TEXTURE_GL(object);
+  g_mutex_clear(&self->mutex);
+  G_OBJECT_CLASS(texture_gl_parent_class)->finalize(object);
+}
+
 static void texture_gl_class_init(TextureGLClass* klass) {
   FL_TEXTURE_GL_CLASS(klass)->populate = texture_gl_populate_texture;
   G_OBJECT_CLASS(klass)->dispose = texture_gl_dispose;
+  G_OBJECT_CLASS(klass)->finalize = texture_gl_finalize;
 }
 
 TextureGL* texture_gl_new(VideoOutput* video_output) {
@@ -195,53 +216,86 @@ TextureGL* texture_gl_new(VideoOutput* video_output) {
   return self;
 }
 
-gboolean texture_gl_populate_texture(FlTextureGL* texture,
-                                     guint32* target,
-                                     guint32* name,
-                                     guint32* width,
-                                     guint32* height,
-                                     GError** error) {
-  TextureGL* self = TEXTURE_GL(texture);
-  VideoOutput* video_output = self->video_output;
-  // Names of disposed textures made in this context
-  texture_gl_delete_pending_names();
+void texture_gl_release(TextureGL* self) {
+  g_mutex_lock(&self->mutex);
+  texture_gl_delete_mpv_resources(self);
+  self->video_output = NULL;
+  g_mutex_unlock(&self->mutex);
+}
+
+// Makes mpv's isolated context current on the raster thread, with Flutter's
+// put aside; the first failure of a texture is said in the log
+static gboolean texture_gl_enter(TextureGL* self,
+                                 EGLDisplay egl_display,
+                                 EGLContext egl_context,
+                                 IsolatedEglSaved* saved) {
+  EGLint error = EGL_SUCCESS;
+  if (isolated_egl_enter(egl_display, egl_context, saved, &error)) {
+    return TRUE;
+  }
+  if (!self->egl_error_logged) {
+    self->egl_error_logged = TRUE;
+    g_printerr(
+        "media_kit: TextureGL: mpv's EGL context could not be made current, "
+        "the frame is skipped. Error: 0x%x\n",
+        error);
+  }
+  return FALSE;
+}
+
+static gboolean texture_gl_leave(TextureGL* self,
+                                 EGLDisplay egl_display,
+                                 IsolatedEglSaved* saved) {
+  if (isolated_egl_leave(egl_display, saved)) {
+    return TRUE;
+  }
+  if (!self->egl_error_logged) {
+    self->egl_error_logged = TRUE;
+    g_printerr(
+        "media_kit: TextureGL: Flutter's EGL context could not be made current "
+        "again.\n");
+  }
+  return FALSE;
+}
+
+// Renders mpv's frame into the texture, (re)allocating mpv's FBO and the
+// EGLImage first when the size changed. Nothing happens in a context that
+// could not be made current.
+static void texture_gl_render(TextureGL* self,
+                              VideoOutput* video_output,
+                              gint32 required_width,
+                              gint32 required_height) {
+  EGLDisplay egl_display = video_output_get_egl_display(video_output);
+  EGLContext egl_context = video_output_get_egl_context(video_output);
+  gboolean first_frame = self->name == 0 || self->fbo == 0 || self->mpv_texture == 0;
+  gboolean resize = self->current_width != required_width ||
+                    self->current_height != required_height;
   
-  gint32 required_width = (guint32)video_output_get_width(video_output);
-  gint32 required_height = (guint32)video_output_get_height(video_output);
-  
-  if (required_width > 0 && required_height > 0) {
-    gboolean first_frame = self->name == 0 || self->fbo == 0 || self->mpv_texture == 0;
-    gboolean resize = self->current_width != required_width ||
-                      self->current_height != required_height;
-    
-    if (first_frame || resize) {
-      // Save Flutter's current EGL context
-      EGLDisplay flutter_display = eglGetCurrentDisplay();
-      EGLContext flutter_context = eglGetCurrentContext();
-      EGLSurface flutter_draw = eglGetCurrentSurface(EGL_DRAW);
-      EGLSurface flutter_read = eglGetCurrentSurface(EGL_READ);
-      
-      EGLDisplay egl_display = video_output_get_egl_display(video_output);
-      EGLContext egl_context = video_output_get_egl_context(video_output);
-      
-      // Switch to mpv's isolated context to create/resize mpv's texture and FBO
-      eglMakeCurrent(egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, egl_context);
-      
+  if (first_frame || resize) {
+    // Switch to mpv's isolated context to create/resize mpv's texture and FBO
+    IsolatedEglSaved saved;
+    gboolean current = texture_gl_enter(self, egl_display, egl_context, &saved);
+    if (current) {
       // Free previous resources in mpv's context
-      if (!first_frame) {
+      if (self->mpv_texture != 0) {
         glDeleteTextures(1, &self->mpv_texture);
+        self->mpv_texture = 0;
+      }
+      if (self->fbo != 0) {
         glDeleteFramebuffers(1, &self->fbo);
-        if (self->export_texture != 0) {
-          glDeleteTextures(1, &self->export_texture);
-          self->export_texture = 0;
-        }
-        if (self->export_fbo != 0) {
-          glDeleteFramebuffers(1, &self->export_fbo);
-          self->export_fbo = 0;
-        }
-        if (self->egl_image != EGL_NO_IMAGE_KHR) {
-          eglDestroyImageKHR(egl_display, self->egl_image);
-        }
+        self->fbo = 0;
+      }
+      if (self->export_texture != 0) {
+        glDeleteTextures(1, &self->export_texture);
+        self->export_texture = 0;
+      }
+      if (self->export_fbo != 0) {
+        glDeleteFramebuffers(1, &self->export_fbo);
+        self->export_fbo = 0;
+      }
+      if (self->egl_image != EGL_NO_IMAGE_KHR) {
+        eglDestroyImageKHR(egl_display, self->egl_image);
+        self->egl_image = EGL_NO_IMAGE_KHR;
       }
       
       // Create mpv's FBO and texture
@@ -302,49 +356,44 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
       } else {
         glFlush();
       }
-      
-      // Switch back to Flutter's context to create/update Flutter's texture
-      eglMakeCurrent(flutter_display, flutter_draw, flutter_read, flutter_context);
-      
-      // Free previous Flutter texture (the 1x1 one made before the first
-      // frame too)
-      if (self->name != 0) {
-        glDeleteTextures(1, &self->name);
-      }
-      
-      // Create Flutter's texture from EGLImage
-      glGenTextures(1, &self->name);
-      self->name_context = eglGetCurrentContext();
-      glBindTexture(GL_TEXTURE_2D, self->name);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-      glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, self->egl_image);
-      glBindTexture(GL_TEXTURE_2D, 0);
-      
-      self->current_width = required_width;
-      self->current_height = required_height;
-      
-      // Notify Flutter about dimension change
-      video_output_notify_texture_update(video_output);
-      
-      // Flutter's context is already current, so we're ready to render
     }
     
-    // Save Flutter's current context
-    EGLDisplay flutter_display = eglGetCurrentDisplay();
-    EGLContext flutter_context = eglGetCurrentContext();
-    EGLSurface flutter_draw = eglGetCurrentSurface(EGL_DRAW);
-    EGLSurface flutter_read = eglGetCurrentSurface(EGL_READ);
+    // Switch back to Flutter's context to create/update Flutter's texture
+    if (!texture_gl_leave(self, egl_display, &saved) || !current) {
+      return;
+    }
     
-    EGLDisplay egl_display = video_output_get_egl_display(video_output);
-    EGLContext egl_context = video_output_get_egl_context(video_output);
-    mpv_render_context* render_context = video_output_get_render_context(video_output);
+    // Free previous Flutter texture (the 1x1 one made before the first
+    // frame too)
+    if (self->name != 0) {
+      glDeleteTextures(1, &self->name);
+    }
     
-    // Switch to mpv's isolated context for rendering
-    eglMakeCurrent(egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, egl_context);
+    // Create Flutter's texture from EGLImage
+    glGenTextures(1, &self->name);
+    self->name_context = eglGetCurrentContext();
+    glBindTexture(GL_TEXTURE_2D, self->name);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, self->egl_image);
+    glBindTexture(GL_TEXTURE_2D, 0);
     
+    self->current_width = required_width;
+    self->current_height = required_height;
+    
+    // Notify Flutter about dimension change
+    video_output_notify_texture_update(video_output);
+    
+    // Flutter's context is already current, so we're ready to render
+  }
+  
+  mpv_render_context* render_context = video_output_get_render_context(video_output);
+  
+  // Switch to mpv's isolated context for rendering
+  IsolatedEglSaved saved;
+  if (texture_gl_enter(self, egl_display, egl_context, &saved)) {
     // Bind mpv's FBO
     glBindFramebuffer(GL_FRAMEBUFFER, self->fbo);
     
@@ -379,9 +428,34 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
     } else {
       glFlush();
     }
-    
-    // Restore Flutter's context
-    eglMakeCurrent(flutter_display, flutter_draw, flutter_read, flutter_context);
+  }
+  
+  // Restore Flutter's context
+  texture_gl_leave(self, egl_display, &saved);
+}
+
+gboolean texture_gl_populate_texture(FlTextureGL* texture,
+                                     guint32* target,
+                                     guint32* name,
+                                     guint32* width,
+                                     guint32* height,
+                                     GError** error) {
+  TextureGL* self = TEXTURE_GL(texture);
+  // Names of disposed textures made in this context
+  texture_gl_delete_pending_names();
+  
+  // Held until Flutter's context is current again: the video output frees
+  // mpv's render context and makes the isolated context current on another
+  // thread only after texture_gl_release took it, and a released texture
+  // draws its last frame without a call into mpv
+  g_mutex_lock(&self->mutex);
+  VideoOutput* video_output = self->video_output;
+  if (video_output != NULL) {
+    gint32 required_width = (guint32)video_output_get_width(video_output);
+    gint32 required_height = (guint32)video_output_get_height(video_output);
+    if (required_width > 0 && required_height > 0) {
+      texture_gl_render(self, video_output, required_width, required_height);
+    }
   }
   
   *target = GL_TEXTURE_2D;
@@ -400,6 +474,7 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
     *width = 1;
     *height = 1;
   }
+  g_mutex_unlock(&self->mutex);
   
   return TRUE;
 }
