@@ -18,9 +18,15 @@ import 'package:media_kit_video/media_kit_video.dart';
 // (timeToMotionMs, startStallMs) -> 9 s plain window -> 5 s window with an
 // animated controls overlay. The whole matrix runs once in portrait and once
 // in landscape (immersive), because landscape has far more pixels to draw.
+//
+// Narrow the matrix with --dart-define:
+//   BENCH_CLIPS=h264_1440p60.mp4,...   BENCH_CONFIGS=mkDefault,native,...
+//   BENCH_PASSES=portrait               BENCH_MPV_LOG=v
+//   BENCH_TRACE=true  (media_kit runs also report time-pos every 50 ms from
+//                      open() and every mpv log line with its offset in ms)
 
 const _host = 'http://127.0.0.1:8787';
-const _clips = [
+const _allClips = [
   'h264_1080p60.mp4',
   'h264_1440p60.mp4',
   'hevc_1440p60.mp4',
@@ -28,9 +34,23 @@ const _clips = [
   'av1_1440p60.mp4',
 ];
 
-enum BenchConfig { mkDefault, mkGpuMediacodec, mkEmbed, native }
+enum BenchConfig { mkDefault, mkCopy, mkGpuMediacodec, mkEmbed, native }
 
-const _passes = ['portrait', 'landscape'];
+const _clipsDefine = String.fromEnvironment('BENCH_CLIPS');
+const _configsDefine = String.fromEnvironment('BENCH_CONFIGS');
+const _passesDefine = String.fromEnvironment('BENCH_PASSES');
+const _mpvLogDefine = String.fromEnvironment('BENCH_MPV_LOG', defaultValue: 'warn');
+const _trace = bool.fromEnvironment('BENCH_TRACE');
+const _version = 3;
+
+List<String> _csv(String s) => [for (final e in s.split(',')) if (e.trim().isNotEmpty) e.trim()];
+
+final List<String> _clips = _clipsDefine.isEmpty ? _allClips : _csv(_clipsDefine);
+final List<BenchConfig> _configs = _configsDefine.isEmpty
+    ? BenchConfig.values
+    : [for (final n in _csv(_configsDefine)) BenchConfig.values.byName(n)];
+final List<String> _passes = _passesDefine.isEmpty ? const ['portrait', 'landscape'] : _csv(_passesDefine);
+final MPVLogLevel _mpvLogLevel = MPVLogLevel.values.byName(_mpvLogDefine);
 
 const _hostAttachDelay = Duration(seconds: 6);
 const _ttffTimeout = Duration(seconds: 20);
@@ -168,7 +188,12 @@ class _BenchPageState extends State<BenchPage> {
     final lastVsync = _frames.isEmpty ? null : _frames.last.vsyncUs;
     await _post({
       'type': 'hello',
-      'version': 2,
+      'version': _version,
+      'clips': _clips,
+      'configs': [for (final c in _configs) c.name],
+      'passes': _passes,
+      'trace': _trace,
+      'mpvLog': _mpvLogLevel.name,
       'refreshRate': view.display.refreshRate,
       'physicalSize': _viewSize(),
       'clockSkewUs': lastVsync == null ? null : developer.Timeline.now - lastVsync,
@@ -178,7 +203,7 @@ class _BenchPageState extends State<BenchPage> {
     for (final pass in _passes) {
       await _setOrientation(pass);
       for (final clip in _clips) {
-        for (final cfg in BenchConfig.values) {
+        for (final cfg in _configs) {
           final viewSize = _viewSize();
           Map<String, dynamic> result;
           try {
@@ -198,7 +223,7 @@ class _BenchPageState extends State<BenchPage> {
             await Future<void>.delayed(_gap);
           }
           result['type'] = 'run';
-          result['version'] = 2;
+          result['version'] = _version;
           result['pass'] = pass;
           result['viewSize'] = viewSize;
           result['clip'] = clip;
@@ -208,12 +233,13 @@ class _BenchPageState extends State<BenchPage> {
       }
     }
     await _setOrientation('portrait');
-    await _post({'type': 'done', 'version': 2, 'epochMs': DateTime.now().millisecondsSinceEpoch});
+    await _post({'type': 'done', 'version': _version, 'epochMs': DateTime.now().millisecondsSinceEpoch});
     if (mounted) setState(() => _status = 'done');
   }
 
   VideoControllerConfiguration _videoConfig(BenchConfig cfg) => switch (cfg) {
         BenchConfig.mkDefault => const VideoControllerConfiguration(),
+        BenchConfig.mkCopy => const VideoControllerConfiguration(vo: 'gpu', hwdec: 'mediacodec-copy'),
         BenchConfig.mkGpuMediacodec => const VideoControllerConfiguration(vo: 'gpu', hwdec: 'mediacodec'),
         BenchConfig.mkEmbed => const VideoControllerConfiguration(vo: 'mediacodec_embed', hwdec: 'mediacodec'),
         BenchConfig.native => throw StateError('native is not a media_kit configuration'),
@@ -233,8 +259,9 @@ class _BenchPageState extends State<BenchPage> {
   Future<double> _timePos(NativePlayer np) async => double.tryParse(await _prop(np, 'time-pos')) ?? 0;
 
   Future<Map<String, dynamic>> _runMediaKit(String clip, BenchConfig cfg) async {
-    final player = Player(configuration: const PlayerConfiguration(logLevel: MPVLogLevel.warn));
+    final player = Player(configuration: PlayerConfiguration(logLevel: _mpvLogLevel));
     final np = player.platform as NativePlayer;
+    final sw = Stopwatch();
     final logs = <String>[];
     final errors = <String>[];
     var rebuffers = 0;
@@ -242,7 +269,12 @@ class _BenchPageState extends State<BenchPage> {
     var playedOnce = false;
     final subs = <StreamSubscription<dynamic>>[
       player.stream.log.listen((l) {
-        if (logs.length < 30) logs.add('[${l.level}] ${l.prefix}: ${l.text}'.trim());
+        final line = '[${l.level}] ${l.prefix}: ${l.text}'.trim();
+        if (_trace) {
+          if (logs.length < 4000) logs.add('${sw.elapsedMilliseconds} $line');
+        } else if (logs.length < 30) {
+          logs.add(line);
+        }
       }),
       player.stream.error.listen((e) {
         if (errors.length < 10) errors.add(e);
@@ -260,7 +292,19 @@ class _BenchPageState extends State<BenchPage> {
     });
     await WidgetsBinding.instance.endOfFrame;
     final result = <String, dynamic>{'runStartEpochMs': DateTime.now().millisecondsSinceEpoch};
-    final sw = Stopwatch()..start();
+    final trace = <List<num>>[];
+    var tracing = _trace;
+    result['openEpochMs'] = DateTime.now().millisecondsSinceEpoch;
+    sw.start();
+    final tracer = !_trace
+        ? null
+        : () async {
+            while (tracing) {
+              final t = sw.elapsedMilliseconds;
+              trace.add([t, double.tryParse(await _prop(np, 'time-pos')) ?? -1]);
+              await Future<void>.delayed(const Duration(milliseconds: 50));
+            }
+          }();
     await player.open(Media('$_host/clips/$clip'));
     String? fail;
     try {
@@ -319,6 +363,9 @@ class _BenchPageState extends State<BenchPage> {
     result['ok'] = fail == null;
     result['error'] = fail;
     result['runEndEpochMs'] = DateTime.now().millisecondsSinceEpoch;
+    tracing = false;
+    await tracer;
+    if (_trace) result['trace'] = trace;
     setState(() {
       _overlay = false;
       _video = null;
