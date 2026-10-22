@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
 """Markdown report for a v3 results file, optionally compared with a v2 baseline.
 
-Usage: report.py <results.jsonl> [--codecs <codecs.log>] [--baseline <results-v2.jsonl>]
+Usage: report.py <results.jsonl>... [--codecs <logcat.txt>] [--baseline <results-v2.jsonl>]
+
+--codecs takes `adb logcat -v epoch --pid=<bench pid>` lines filtered to codec component names and
+VideoOutputManager.setSurfaceSize; the decoder per run and surface changes per window come from it.
 """
 import argparse
 import json
+import re
+
+NATIVE = ('native', 'nativeTexture')
+CODEC = re.compile(r'(c2\.(?:qti|android|exynos|mtk)\.[a-z0-9.]+?\.decoder|OMX\.[A-Za-z0-9.]+?\.decoder)')
 
 
 def load(path):
@@ -16,10 +23,18 @@ def codec_lines(path):
     for line in open(path):
         parts = line.split()
         try:
-            out.append((float(parts[0]) * 1000, parts[-1]))
+            t = float(parts[0]) * 1000
         except (ValueError, IndexError):
-            pass
+            continue
+        if 'setSurfaceSize' in line:
+            out.append((t, 'setSurfaceSize'))
+        for name in CODEC.findall(line):
+            out.append((t, name))
     return out
+
+
+def surface_events(lines, a, b):
+    return sum(1 for t, n in lines if n == 'setSurfaceSize' and a <= t <= b)
 
 
 def decoders(run, lines):
@@ -56,7 +71,7 @@ def short_clip(name):
 def row(run, lines):
     p, o = run.get('plain') or {}, run.get('overlay') or {}
     info = run.get('info') or {}
-    native = run['config'] == 'native'
+    native = run['config'] in NATIVE
     dec = decoders(run, lines) if lines else ''
     hw = 'native' if native else info.get('hwdec-current') or 'no'
     w = warn_counts(run)
@@ -79,11 +94,11 @@ HEADER = ('| clip | config | TTFF ms | motion ms | rate P/O | mpv drops P/O | de
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('results')
+    ap.add_argument('results', nargs='+')
     ap.add_argument('--codecs')
     ap.add_argument('--baseline')
     args = ap.parse_args()
-    recs = load(args.results)
+    recs = [r for path in args.results for r in load(path)]
     lines = codec_lines(args.codecs) if args.codecs else []
     runs = [r for r in recs if r.get('type') == 'run']
     for link in (r for r in recs if r.get('type') == 'link'):
@@ -98,8 +113,22 @@ def main():
         for r in rs:
             print(row(r, lines))
         print()
-    totals = {k: sum(warn_counts(r)[k] for r in runs if r['config'] != 'native') for k in ('invalidTs', 'fileCache', 'osc')}
-    mk = sum(1 for r in runs if r['config'] != 'native')
+    anim = [r for r in runs if r.get('animated')]
+    if anim:
+        print('### Animated window: video moving between full screen and a 30% mini-player, 1 transition/s\n')
+        print('| clip | config | Flutter fps | raster p90/p99 (ms) | frames >8.3 / >16.7 ms | mpv drops | rate | backward jumps '
+              '| longest stall ms | surface changes |\n|' + '---|' * 10)
+        for r in anim:
+            a = r['animated']
+            drops = None if r['config'] in NATIVE else delta(r, 'frame-drop-count', 'overlayEnd', 'animatedEnd')
+            stall = f"{a.get('maxStallMs')}" + (' (500 ms position steps)' if r['config'] in NATIVE else '')
+            surf = surface_events(lines, a['startEpochMs'], a['endEpochMs']) if lines else '–'
+            print(f"| {short_clip(r['clip'])} | {r['config']} | {a.get('flutterFps')} | {fmt(a.get('rasterP90Ms'), a.get('rasterP99Ms'))} "
+                  f"| {a.get('over8ms')}/{a.get('over16ms')} | {'–' if drops is None else drops} | {a.get('playbackRate')} "
+                  f"| {a.get('backJumps')} | {stall} | {'–' if r['config'] in NATIVE else surf} |")
+        print()
+    totals = {k: sum(warn_counts(r)[k] for r in runs if r['config'] not in NATIVE) for k in ('invalidTs', 'fileCache', 'osc')}
+    mk = sum(1 for r in runs if r['config'] not in NATIVE)
     back = sum(1 for r in runs for w in ('plain', 'overlay') if ((r.get(w) or {}).get('playbackRate') or 0) < 0)
     print(f"media_kit runs: {mk}; 'Invalid video timestamp': {totals['invalidTs']}; "
           f"'Failed to create file cache': {totals['fileCache']}; osc property errors: {totals['osc']}; "
@@ -108,7 +137,7 @@ def main():
         base = [r for r in load(args.baseline) if r.get('type') == 'run' and r.get('pass') == 'portrait']
         print('### Before / after (portrait), baseline = stock upstream main\n')
         print('| clip | before: default (auto-safe → copy) rate P/O, invalid-ts | after: default (zero-copy) rate P/O, invalid-ts '
-              '| after: copy rate P/O | native rate P/O |\n|---|---|---|---|---|')
+              '| after: copy rate P/O | native rate P/O | nativeTexture rate P/O |\n|---|---|---|---|---|---|')
         for clip in sorted({r['clip'] for r in base}):
             def pick(rows, cfg):
                 return next((r for r in rows if r['clip'] == clip and r['config'] == cfg), None)
@@ -120,8 +149,9 @@ def main():
                     return 'FAILED'
                 return fmt((r.get('plain') or {}).get('playbackRate'), (r.get('overlay') or {}).get('playbackRate'))
             b, d, c, n = pick(base, 'mkDefault'), pick(runs, 'mkDefault'), pick(runs, 'mkCopy'), pick(runs, 'native')
+            nt = pick(runs, 'nativeTexture')
             print(f"| {short_clip(clip)} | {rate(b)}, {warn_counts(b)['invalidTs'] if b else '–'} "
-                  f"| {rate(d)}, {warn_counts(d)['invalidTs'] if d else '–'} | {rate(c)} | {rate(n)} |")
+                  f"| {rate(d)}, {warn_counts(d)['invalidTs'] if d else '–'} | {rate(c)} | {rate(n)} | {rate(nt)} |")
 
 
 if __name__ == '__main__':

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:developer' as developer;
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:better_native_video_player/better_native_video_player.dart';
@@ -34,7 +35,10 @@ const _allClips = [
   'av1_1440p60.mp4',
 ];
 
-enum BenchConfig { mkDefault, mkCopy, mkGpuMediacodec, mkEmbed, native }
+// native: better_native_video_player's default hybrid-composition platform view.
+// nativeTexture: the user's app settings (texture mode, feed buffering, lightweight inline views),
+// applied through the plugin's global config, so it never shares an app launch with `native`.
+enum BenchConfig { mkDefault, mkCopy, mkGpuMediacodec, mkEmbed, native, nativeTexture }
 
 const _clipsDefine = String.fromEnvironment('BENCH_CLIPS');
 const _configsDefine = String.fromEnvironment('BENCH_CONFIGS');
@@ -44,16 +48,29 @@ const _trace = bool.fromEnvironment('BENCH_TRACE');
 // BENCH_LINK_TEST=<clip>: before the matrix, time one full GET of that clip so network limits of the
 // adb-reverse link can be told apart from decode or render limits.
 const _linkTestClip = String.fromEnvironment('BENCH_LINK_TEST');
+// BENCH_ANIMATE=mkDefault,nativeTexture: after the overlay window, those configs also run an animated
+// window that moves the video between full screen and a corner mini-player, one transition per second.
+const _animateDefine = String.fromEnvironment('BENCH_ANIMATE');
+const _animatedWindow = Duration(seconds: 6);
+// BENCH_CHECKS=true: run the functional regression checks instead of the performance matrix.
+const _checks = bool.fromEnvironment('BENCH_CHECKS');
+const _liveHlsUrl = String.fromEnvironment('BENCH_LIVE_HLS', defaultValue: '$_host/clips/live.m3u8');
+// Local HLS VOD from tool/encode_check_clips.sh by default. Apple's public bipbop master
+// (https://devstreaming-cdn.apple.com/videos/streaming/examples/bipbop_16x9/bipbop_16x9_variant.m3u8)
+// works too, if the phone's own connection loads its variants fast enough.
+const _vodHlsUrl = String.fromEnvironment('BENCH_VOD_HLS', defaultValue: '$_host/clips/vod.m3u8');
 const _version = 3;
 
 List<String> _csv(String s) => [for (final e in s.split(',')) if (e.trim().isNotEmpty) e.trim()];
 
 final List<String> _clips = _clipsDefine.isEmpty ? _allClips : _csv(_clipsDefine);
+// nativeTexture changes the plugin's global config, so it only runs when asked for explicitly.
 final List<BenchConfig> _configs = _configsDefine.isEmpty
-    ? BenchConfig.values
+    ? [for (final c in BenchConfig.values) if (c != BenchConfig.nativeTexture) c]
     : [for (final n in _csv(_configsDefine)) BenchConfig.values.byName(n)];
 final List<String> _passes = _passesDefine.isEmpty ? const ['portrait', 'landscape'] : _csv(_passesDefine);
 final MPVLogLevel _mpvLogLevel = MPVLogLevel.values.byName(_mpvLogDefine);
+final Set<BenchConfig> _animated = {for (final n in _csv(_animateDefine)) BenchConfig.values.byName(n)};
 
 const _hostAttachDelay = Duration(seconds: 6);
 const _ttffTimeout = Duration(seconds: 20);
@@ -66,6 +83,17 @@ const _gap = Duration(seconds: 2);
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   MediaKit.ensureInitialized();
+  if (_configs.contains(BenchConfig.nativeTexture)) {
+    if (_configs.contains(BenchConfig.native)) {
+      throw StateError('native and nativeTexture need separate app launches: the plugin config is global');
+    }
+    // Must be set before any NativeVideoPlayerController is created.
+    NativeVideoPlayerConfig.global = const NativeVideoPlayerConfig(
+      androidTextureMode: true,
+      androidBufferConfig: NativeVideoPlayerAndroidBufferConfig.feed(),
+      lightweightInlineViews: true,
+    );
+  }
   runApp(const BenchApp());
 }
 
@@ -116,6 +144,40 @@ Map<String, dynamic> _windowStats(int fromUs, int toUs, {double? playedSeconds})
   };
 }
 
+/// One animated window: Flutter frame stats plus playback-position samples ([ms into window, seconds]).
+class _AnimatedPhase {
+  _AnimatedPhase(this.startUs, this.startEpochMs);
+  final int startUs;
+  final int startEpochMs;
+  late int endUs;
+  late int endEpochMs;
+  final samples = <List<num>>[];
+
+  Map<String, dynamic> stats() {
+    var backJumps = 0;
+    var maxStallMs = 0;
+    var lastAdvanceMs = samples.isEmpty ? 0 : samples.first[0];
+    for (var i = 1; i < samples.length; i++) {
+      final dp = samples[i][1] - samples[i - 1][1];
+      if (dp < -0.05) backJumps++;
+      if (dp > 0.001) {
+        lastAdvanceMs = samples[i][0];
+      } else {
+        maxStallMs = math.max(maxStallMs, (samples[i][0] - lastAdvanceMs).toInt());
+      }
+    }
+    final played = samples.length < 2 ? 0.0 : (samples.last[1] - samples.first[1]).toDouble();
+    return {
+      ..._windowStats(startUs, endUs, playedSeconds: played),
+      'startEpochMs': startEpochMs,
+      'endEpochMs': endEpochMs,
+      'backJumps': backJumps,
+      'maxStallMs': maxStallMs,
+      'samples': samples,
+    };
+  }
+}
+
 final _http = HttpClient();
 
 Future<void> _post(Map<String, dynamic> body) async {
@@ -157,10 +219,18 @@ class BenchPage extends StatefulWidget {
   State<BenchPage> createState() => _BenchPageState();
 }
 
-class _BenchPageState extends State<BenchPage> {
+class _BenchPageState extends State<BenchPage> with TickerProviderStateMixin {
   Widget? _video;
   bool _overlay = false;
+  // 0 = full screen, 1 = corner mini-player; driven only during an animated window.
+  late final AnimationController _mini = AnimationController(vsync: this, duration: const Duration(seconds: 1));
   String _status = 'waiting for host';
+
+  @override
+  void dispose() {
+    _mini.dispose();
+    super.dispose();
+  }
 
   @override
   void initState() {
@@ -197,11 +267,20 @@ class _BenchPageState extends State<BenchPage> {
       'passes': _passes,
       'trace': _trace,
       'mpvLog': _mpvLogLevel.name,
+      'animated': [for (final c in _animated) c.name],
+      'linkTest': _linkTestClip,
       'refreshRate': view.display.refreshRate,
       'physicalSize': _viewSize(),
       'clockSkewUs': lastVsync == null ? null : developer.Timeline.now - lastVsync,
       'epochMs': DateTime.now().millisecondsSinceEpoch,
     });
+    if (_checks) {
+      await _setOrientation('portrait');
+      await _runChecks();
+      await _post({'type': 'done', 'version': _version, 'epochMs': DateTime.now().millisecondsSinceEpoch});
+      if (mounted) setState(() => _status = 'done');
+      return;
+    }
     if (_linkTestClip.isNotEmpty) {
       if (mounted) setState(() => _status = 'link test · $_linkTestClip');
       await _post(await _linkTest(_linkTestClip));
@@ -214,7 +293,9 @@ class _BenchPageState extends State<BenchPage> {
           final viewSize = _viewSize();
           Map<String, dynamic> result;
           try {
-            result = cfg == BenchConfig.native ? await _runNative(clip, nativeId++) : await _runMediaKit(clip, cfg);
+            result = cfg == BenchConfig.native || cfg == BenchConfig.nativeTexture
+                ? await _runNative(clip, cfg, nativeId++)
+                : await _runMediaKit(clip, cfg);
           } catch (e, st) {
             result = {
               'ok': false,
@@ -242,6 +323,139 @@ class _BenchPageState extends State<BenchPage> {
     await _setOrientation('portrait');
     await _post({'type': 'done', 'version': _version, 'epochMs': DateTime.now().millisecondsSinceEpoch});
     if (mounted) setState(() => _status = 'done');
+  }
+
+  /// [ms since start, mpv time-pos] every 200 ms for [d].
+  Future<List<List<num>>> _samplePos(NativePlayer np, Duration d) async {
+    final out = <List<num>>[];
+    final sw = Stopwatch()..start();
+    while (sw.elapsed < d) {
+      out.add([sw.elapsedMilliseconds, await _timePos(np)]);
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+    }
+    return out;
+  }
+
+  /// Runs [body] with a fresh Player rendered through a default VideoController.
+  Future<Map<String, dynamic>> _check(
+    String name,
+    Future<Map<String, dynamic>> Function(Player player, NativePlayer np, VideoController controller) body,
+  ) async {
+    final player = Player(configuration: const PlayerConfiguration(logLevel: MPVLogLevel.warn));
+    final np = player.platform as NativePlayer;
+    final logs = <String>[];
+    final sub = player.stream.log.listen((l) {
+      if (logs.length < 40) logs.add('[${l.level}] ${l.prefix}: ${l.text}'.trim());
+    });
+    final controller = VideoController(player);
+    setState(() {
+      _status = 'check · $name';
+      _video = Video(controller: controller, controls: NoVideoControls, fit: BoxFit.contain);
+    });
+    await WidgetsBinding.instance.endOfFrame;
+    Map<String, dynamic> result;
+    try {
+      result = await body(player, np, controller);
+    } catch (e, st) {
+      result = {'pass': false, 'error': '$e', 'stack': st.toString().split('\n').take(6).join(' | ')};
+    }
+    result['info'] = await _props(np, ['hwdec-current', 'video-params/w', 'video-params/h', 'estimated-vf-fps']);
+    setState(() => _video = null);
+    await WidgetsBinding.instance.endOfFrame;
+    await sub.cancel();
+    await player.dispose();
+    result['mpvLog'] = logs;
+    await Future<void>.delayed(_gap);
+    return result;
+  }
+
+  Future<void> _runChecks() async {
+    const long = '$_host/clips/long_720p30_6min.mp4';
+    bool noneBelow(List<List<num>> s, double min, {int afterMs = 0}) =>
+        s.where((e) => e[0] >= afterMs && e[1] > 0).every((e) => e[1] >= min);
+    final checks = <String, Future<Map<String, dynamic>> Function(Player, NativePlayer, VideoController)>{
+      // media-kit#1215: Media.start must survive the Surface attach.
+      'mediaStart5min': (p, np, c) async {
+        await p.open(Media(long, start: const Duration(minutes: 5)));
+        final s = await _samplePos(np, const Duration(seconds: 8));
+        return {'pass': noneBelow(s, 299.5) && s.last[1] >= 303, 'samples': s};
+      },
+      // media-kit#1215: a seek issued right after open() must stick.
+      'seekRightAfterOpen': (p, np, c) async {
+        await p.open(Media(long));
+        await p.seek(const Duration(minutes: 2));
+        final s = await _samplePos(np, const Duration(seconds: 8));
+        return {'pass': noneBelow(s, 119.5, afterMs: 1500) && s.last[1] >= 123, 'samples': s};
+      },
+      // media-kit#1417: MP4 whose first keyframe is 8 s in (audio from 0): playback must start at 0.
+      'lateFirstKeyframeMp4': (p, np, c) async {
+        await p.open(Media('$_host/clips/late_keyframe.mp4'));
+        final s = await _samplePos(np, const Duration(seconds: 14));
+        final first = s.firstWhere((e) => e[1] > 0.05, orElse: () => [0, -1]);
+        return {'pass': first[1] >= 0 && first[1] < 3 && s.last[1] >= 10, 'firstMovingPos': first[1], 'samples': s};
+      },
+      // Harder variant: MPEG-TS cut mid-GOP, so not even the codec parameters exist before the keyframe
+      // 9.4 s in; the video size is unknown until then.
+      'lateKeyframeTsNoCodecParams': (p, np, c) async {
+        await p.open(Media('$_host/clips/late_keyframe.ts'));
+        final s = await _samplePos(np, const Duration(seconds: 14));
+        final first = s.firstWhere((e) => e[1] > 0.05, orElse: () => [0, -1]);
+        return {'pass': first[1] >= 0 && first[1] < 3 && s.last[1] >= 10, 'firstMovingPos': first[1], 'samples': s};
+      },
+      // media-kit#1445: a live (non-seekable) HLS stream must render & keep playing.
+      'liveHls': (p, np, c) async {
+        await p.open(Media(_liveHlsUrl));
+        await c.waitUntilFirstFrameRendered.timeout(const Duration(seconds: 20), onTimeout: () {});
+        final s = await _samplePos(np, const Duration(seconds: 15));
+        final start = s.firstWhere((e) => e[1] > 0, orElse: () => [0, 0])[1];
+        final w = int.tryParse(await _prop(np, 'video-params/w')) ?? 0;
+        return {'pass': s.last[1] - start >= 10 && w > 0, 'advancedSeconds': s.last[1] - start, 'samples': s};
+      },
+      // media-kit#997: start position on HLS VOD.
+      'hlsVodStart60s': (p, np, c) async {
+        final sw = Stopwatch()..start();
+        await p.open(Media(_vodHlsUrl, start: const Duration(seconds: 60)));
+        // Generous budget: a public master with many variants loads over the phone's own connection.
+        final loaded = await _waitFor(() async => await _timePos(np) > 0, const Duration(seconds: 40));
+        final loadMs = sw.elapsedMilliseconds;
+        final s = await _samplePos(np, const Duration(seconds: 10));
+        return {
+          'pass': loaded && noneBelow(s, 59) && s.last[1] >= 62,
+          'loaded': loaded,
+          'loadMs': loadMs,
+          'samples': s,
+        };
+      },
+      // media-kit#1453: loop at end of file, then open the next item: no abort.
+      'eofLoopThenNext': (p, np, c) async {
+        await p.setPlaylistMode(PlaylistMode.single);
+        await p.open(Media('$_host/clips/short_a_4s.mp4'));
+        final s1 = await _samplePos(np, const Duration(seconds: 9));
+        var wrapped = false;
+        for (var i = 1; i < s1.length; i++) {
+          if (s1[i - 1][1] > 3.0 && s1[i][1] < 1.0) wrapped = true;
+        }
+        await p.open(Media('$_host/clips/short_b_4s.mp4'));
+        final s2 = await _samplePos(np, const Duration(seconds: 3));
+        return {'pass': wrapped && s2.last[1] > 1.0, 'wrapped': wrapped, 'samples': s1, 'samplesNext': s2};
+      },
+      // media-kit#1453: complete at end of file, then open the next item: no abort.
+      'eofCompleteThenNext': (p, np, c) async {
+        await p.setPlaylistMode(PlaylistMode.none);
+        await p.open(Media('$_host/clips/short_a_4s.mp4'));
+        final completed = await _waitFor(() async => p.state.completed, const Duration(seconds: 12));
+        await p.open(Media('$_host/clips/short_b_4s.mp4'));
+        final s2 = await _samplePos(np, const Duration(seconds: 3));
+        return {'pass': completed && s2.last[1] > 1.0, 'completed': completed, 'samplesNext': s2};
+      },
+    };
+    for (final entry in checks.entries) {
+      final r = await _check(entry.key, entry.value);
+      r['type'] = 'check';
+      r['version'] = _version;
+      r['name'] = entry.key;
+      await _post(r);
+    }
   }
 
   Future<Map<String, dynamic>> _linkTest(String clip) async {
@@ -275,7 +489,9 @@ class _BenchPageState extends State<BenchPage> {
         BenchConfig.mkCopy => const VideoControllerConfiguration(vo: 'gpu', hwdec: 'mediacodec-copy'),
         BenchConfig.mkGpuMediacodec => const VideoControllerConfiguration(vo: 'gpu', hwdec: 'mediacodec'),
         BenchConfig.mkEmbed => const VideoControllerConfiguration(vo: 'mediacodec_embed', hwdec: 'mediacodec'),
-        BenchConfig.native => throw StateError('native is not a media_kit configuration'),
+        BenchConfig.native ||
+        BenchConfig.nativeTexture =>
+          throw StateError('${cfg.name} is not a media_kit configuration'),
       };
 
   Future<String> _prop(NativePlayer np, String name) async {
@@ -370,6 +586,7 @@ class _BenchPageState extends State<BenchPage> {
     ];
     List<int>? win;
     List<double>? pos;
+    _AnimatedPhase? animatedPhase;
     if (fail == null) {
       final t0 = developer.Timeline.now;
       final c0 = await _props(np, counters);
@@ -383,6 +600,10 @@ class _BenchPageState extends State<BenchPage> {
       win = [t0, t1, t2];
       pos = [for (final c in [c0, c1, c2]) double.tryParse(c['time-pos'] ?? '') ?? 0];
       result['counters'] = {'start': c0, 'plainEnd': c1, 'overlayEnd': c2};
+      if (_animated.contains(cfg)) {
+        animatedPhase = await _animatedPhase(() => _timePos(np));
+        result['counters']['animatedEnd'] = await _props(np, counters);
+      }
     }
     result['info'] = await _props(np, [
       'hwdec-current',
@@ -413,13 +634,14 @@ class _BenchPageState extends State<BenchPage> {
       result['plain'] = _windowStats(win[0], win[1], playedSeconds: pos[1] - pos[0]);
       result['overlay'] = _windowStats(win[1], win[2], playedSeconds: pos[2] - pos[1]);
     }
+    if (animatedPhase != null) result['animated'] = animatedPhase.stats();
     result['rebuffers'] = rebuffers;
     result['errors'] = errors;
     result['mpvLog'] = logs;
     return result;
   }
 
-  Future<Map<String, dynamic>> _runNative(String clip, int id) async {
+  Future<Map<String, dynamic>> _runNative(String clip, BenchConfig cfg, int id) async {
     final c = NativeVideoPlayerController(
       id: id,
       autoPlay: true,
@@ -443,7 +665,7 @@ class _BenchPageState extends State<BenchPage> {
 
     c.addActivityListener(listener);
     setState(() {
-      _status = '$clip · native';
+      _status = '$clip · ${cfg.name}';
       _overlay = false;
       _video = NativeVideoPlayer(controller: c);
     });
@@ -451,7 +673,9 @@ class _BenchPageState extends State<BenchPage> {
     final result = <String, dynamic>{
       'runStartEpochMs': DateTime.now().millisecondsSinceEpoch,
       'ttffMeaning': 'load() -> first playing state (the plugin\'s own startup metric)',
-      'renderMode': 'platform view via initSurfaceAndroidView (androidTextureMode=false, the default)',
+      'renderMode': cfg == BenchConfig.nativeTexture
+          ? 'texture (androidTextureMode=true, feed buffering, lightweightInlineViews=true)'
+          : 'platform view via initSurfaceAndroidView (androidTextureMode=false, the default)',
     };
     final sw = Stopwatch()..start();
     await c.load(url: '$_host/clips/$clip');
@@ -477,6 +701,7 @@ class _BenchPageState extends State<BenchPage> {
     }
     List<int>? win;
     List<int>? pos;
+    _AnimatedPhase? animatedPhase;
     if (fail == null) {
       final t0 = developer.Timeline.now;
       final p0 = c.currentPosition.inMilliseconds;
@@ -490,6 +715,9 @@ class _BenchPageState extends State<BenchPage> {
       win = [t0, t1, t2];
       pos = [p0, p1, p2];
       result['positionsMs'] = pos;
+      if (_animated.contains(cfg)) {
+        animatedPhase = await _animatedPhase(() async => c.currentPosition.inMilliseconds / 1000);
+      }
     }
     result['ok'] = fail == null;
     result['error'] = fail;
@@ -506,9 +734,33 @@ class _BenchPageState extends State<BenchPage> {
       result['plain'] = _windowStats(win[0], win[1], playedSeconds: (pos[1] - pos[0]) / 1000);
       result['overlay'] = _windowStats(win[1], win[2], playedSeconds: (pos[2] - pos[1]) / 1000);
     }
+    if (animatedPhase != null) {
+      result['animated'] = animatedPhase.stats()
+        ..['positionGranularity'] = 'NativeVideoPlayerConfig.timeUpdateInterval (500 ms by default)';
+    }
     result['rebuffers'] = rebuffers;
     result['errors'] = errors;
     return result;
+  }
+
+  /// Animates the video between full screen and a corner mini-player (one transition per second)
+  /// for [_animatedWindow], sampling the playback position every 100 ms.
+  Future<_AnimatedPhase> _animatedPhase(Future<double> Function() position) async {
+    setState(() => _overlay = false);
+    final phase = _AnimatedPhase(developer.Timeline.now, DateTime.now().millisecondsSinceEpoch);
+    final sw = Stopwatch()..start();
+    _mini.repeat(reverse: true);
+    while (sw.elapsed < _animatedWindow) {
+      phase.samples.add([sw.elapsedMilliseconds, await position()]);
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    }
+    phase.samples.add([sw.elapsedMilliseconds, await position()]);
+    phase.endUs = developer.Timeline.now;
+    phase.endEpochMs = DateTime.now().millisecondsSinceEpoch;
+    _mini.stop();
+    _mini.value = 0;
+    await WidgetsBinding.instance.endOfFrame;
+    return phase;
   }
 
   @override
@@ -518,7 +770,23 @@ class _BenchPageState extends State<BenchPage> {
       body: Stack(
         fit: StackFit.expand,
         children: [
-          if (_video != null) SizedBox.expand(child: _video!),
+          // Always the same tree, full screen while _mini is 0, so animating never re-parents the video.
+          if (_video != null)
+            Positioned.fill(
+              child: LayoutBuilder(
+                builder: (context, box) => AnimatedBuilder(
+                  animation: _mini,
+                  child: _video,
+                  builder: (context, child) {
+                    final full = Offset.zero & box.biggest;
+                    final w = box.maxWidth * 0.3;
+                    final mini = Rect.fromLTWH(box.maxWidth - w - 16, box.maxHeight - w * 9 / 16 - 96, w, w * 9 / 16);
+                    final rect = Rect.lerp(full, mini, Curves.easeInOut.transform(_mini.value))!;
+                    return Stack(children: [Positioned.fromRect(rect: rect, child: child!)]);
+                  },
+                ),
+              ),
+            ),
           if (_overlay) const Align(alignment: Alignment.bottomCenter, child: _ControlsOverlay()),
           Positioned(
             top: 36,
