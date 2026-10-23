@@ -57,3 +57,17 @@ Assume the apps mostly use custom overlays, so the core must be cheap for them.
 - Raising the minimum SDK for native assets is fine; Flutter 3.44+ is already required.
 - Vulkan/gpu-next is not pursued: Android zero-copy decoding is GL-only, and Anime4K works over OpenGL.
 - Benchmarks and baselines live in `media_kit_bench/results/` on the `bench` branch.
+
+## To measure next: platform views with HCPP (Android 14+)
+The user's observation with better_native_video_player:
+- Platform-view mode: playback is smooth, but moving the player (swipe, mini-player) lags.
+- Texture mode: movement is smooth, but every video frame costs a Flutter composite.
+
+Flutter 3.47 ships Hybrid Composition++. It's enabled with the manifest meta-data `io.flutter.embedding.android.EnableHcpp` and needs API 34+. It composites platform views through SurfaceControl in sync with Flutter frames, which might give both: direct video composition for playback and smooth movement.
+
+**Phone A/B:** better_native_video_player in platform-view mode, with HCPP off and on; static playback plus the animated mini-player phase; compared with texture mode.
+
+If HCPP wins, the fork gets an opt-in Android "platform view output" mode on API 34+, with texture mode as the fallback. Before relying on it, check:
+- clipping and rounded corners;
+- opacity;
+- PageView neighbours.
