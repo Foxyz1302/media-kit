@@ -28,11 +28,22 @@ The C bridge is built through a build hook. Routing release builds through the i
 ## Defaults vs presets
 Correctness and security fixes become the new defaults:
 - network reconnect and timeouts, so a hiccup no longer ends a video as "completed";
+- `cache-on-disk=no`: media_kit turns the disk cache on without a `cache-dir`, so mpv logs "Failed to create file cache." as an error on every open and caches in RAM anyway (seen with mpv 0.41 on Linux; sync_relay pins `cache-on-disk=no`);
 - load errors delivered as events;
 - `hr-seek-framedrop`;
 - TLS verification on, with a bundled CA on Android and schannel or a CA bundle on Windows.
 
-Trade-offs become opt-in presets: buffer sizes (feed/stream), desktop render quality.
+Trade-offs become opt-in presets: buffer sizes (feed/stream), desktop render quality (scalers, debanding). The desktop render size is a default, see below.
+
+## Desktop render size and shaders
+- The video output renders at the size the `Video` widget shows it at, instead of the video's own size (`VideoControllerConfiguration.renderAtWidgetSize`, branch `sharp-render`, ported from sync_relay's "sharp video and subtitles"):
+  - fitted to the picture, without letterbox;
+  - applied once a resize has settled (120 ms), never on every frame of a drag;
+  - within the display's physical size, and never below the video's own size unless the widget shows it smaller;
+  - only when the output renders on a GPU; a size set through `setSize` or the configuration wins.
+- Default on Linux. On Windows it stays opt-in until the Windows lane verifies it: a stable texture id across resizes (P2-W2), the `{gpu}` answer from `VideoOutputManager.Create`, and a redraw of a paused output after `SetSize`.
+- No `fbo-format=rgba32f` default for shaders. mpv's OpenGL renderer has no 32-bit float FBO formats on GLES (`video/out/opengl/formats.c`), and a user-set `fbo-format` that fails doesn't fall back: mpv enters dumb mode, which drops user shaders such as Anime4K and makes every scaler bilinear. Verified with the libmpv render API on a GLES 3.2 context (mpv 0.41). The sync_relay mpv CLI measurement, red error from ~75 to ~2 levels with `rgba32f`, is suspect: it was likely dumb mode, that is, no Anime4K at all.
+- Anime4K at full precision on GLES stays app-side. sync_relay rewrites its shipped Anime4K files so that every network read goes through a `highp` identity function, because mpv declares `precision mediump sampler2D` on GLES. The library can't do that to arbitrary user shaders without changing the `glsl-shaders` value apps read back. A library-level fix for #1438 would be a desktop GL context on Linux (issues-triage #20).
 
 ## Feed and animation support
 - a resize policy (no re-render on every frame while animating);
