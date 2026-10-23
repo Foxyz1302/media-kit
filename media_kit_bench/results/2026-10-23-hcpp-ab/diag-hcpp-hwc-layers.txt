@@ -1,0 +1,37 @@
+@T 1792718532895 1792718532986
+@T 1792718534395 1792718534495
+@T 1792718535895 1792718536013
+layer: 96409 name: fa78fa6 SurfaceView[dev.foxyz.media_kit_bench/dev.foxyz.media_kit_bench.MainActivity]#3(BLAST Consumer)3 z: 2 composition: Device/Device alpha: 255 format:  Y_CBCR_420_VENUS_UBWC dataspace:0x10810000 transform: 0/0/0 buffer_id: 0xb400007de318dc80 secure: 0
+@T 1792718537395 1792718537527
+layer: 96409 name: fa78fa6 SurfaceView[dev.foxyz.media_kit_bench/dev.foxyz.media_kit_bench.MainActivity]#3(BLAST Consumer)3 z: 2 composition: Device/Device alpha: 255 format:  Y_CBCR_420_VENUS_UBWC dataspace:0x10810000 transform: 0/0/0 buffer_id: 0xb400007de318be20 secure: 0
+@T 1792718538895 1792718539029
+layer: 96409 name: fa78fa6 SurfaceView[dev.foxyz.media_kit_bench/dev.foxyz.media_kit_bench.MainActivity]#3(BLAST Consumer)3 z: 2 composition: Device/Device alpha: 255 format:  Y_CBCR_420_VENUS_UBWC dataspace:0x10810000 transform: 0/0/0 buffer_id: 0xb400007de3191c10 secure: 0
+@T 1792718540396 1792718540522
+layer: 96409 name: fa78fa6 SurfaceView[dev.foxyz.media_kit_bench/dev.foxyz.media_kit_bench.MainActivity]#3(BLAST Consumer)3 z: 2 composition: Device/Device alpha: 255 format:  Y_CBCR_420_VENUS_UBWC dataspace:0x10810000 transform: 0/0/0 buffer_id: 0xb400007de318f150 secure: 0
+@T 1792718541896 1792718542040
+layer: 96409 name: fa78fa6 SurfaceView[dev.foxyz.media_kit_bench/dev.foxyz.media_kit_bench.MainActivity]#3(BLAST Consumer)3 z: 2 composition: Device/Device alpha: 255 format:  Y_CBCR_420_VENUS_UBWC dataspace:0x10810000 transform: 0/0/0 buffer_id: 0xb400007de318c060 secure: 0
+@T 1792718543396 1792718543524
+layer: 96409 name: fa78fa6 SurfaceView[dev.foxyz.media_kit_bench/dev.foxyz.media_kit_bench.MainActivity]#3(BLAST Consumer)3 z: 2 composition: Device/Device alpha: 255 format:  Y_CBCR_420_VENUS_UBWC dataspace:0x10810000 transform: 0/0/0 buffer_id: 0xb400007de3191c10 secure: 0
+@T 1792718544896 1792718545050
+layer: 96409 name: fa78fa6 SurfaceView[dev.foxyz.media_kit_bench/dev.foxyz.media_kit_bench.MainActivity]#3(BLAST Consumer)3 z: 2 composition: Device/Device alpha: 255 format:  Y_CBCR_420_VENUS_UBWC dataspace:0x10810000 transform: 0/0/0 buffer_id: 0xb400007de318f150 secure: 0
+@T 1792718546396 1792718546543
+layer: 96409 name: fa78fa6 SurfaceView[dev.foxyz.media_kit_bench/dev.foxyz.media_kit_bench.MainActivity]#3(BLAST Consumer)3 z: 2 composition: Device/Device alpha: 255 format:  Y_CBCR_420_VENUS_UBWC dataspace:0x10810000 transform: 0/0/0 buffer_id: 0xb400007de318f150 secure: 0
+@T 1792718547896 1792718548040
+layer: 96409 name: fa78fa6 SurfaceView[dev.foxyz.media_kit_bench/dev.foxyz.media_kit_bench.MainActivity]#3(BLAST Consumer)3 z: 2 composition: Device/Device alpha: 255 format:  Y_CBCR_420_VENUS_UBWC dataspace:0x10810000 transform: 0/0/0 buffer_id: 0xb400007de318c060 secure: 0
+@T 1792718549396 1792718549560
+layer: 96409 name: fa78fa6 SurfaceView[dev.foxyz.media_kit_bench/dev.foxyz.media_kit_bench.MainActivity]#3(BLAST Consumer)3 z: 2 composition: Device/Device alpha: 255 format:  Y_CBCR_420_VENUS_UBWC dataspace:0x10810000 transform: 0/0/0 buffer_id: 0xb400007de318dc80 secure: 0
+@T 1792718550896 1792718551031
+layer: 96409 name: fa78fa6 SurfaceView[dev.foxyz.media_kit_bench/dev.foxyz.media_kit_bench.MainActivity]#3(BLAST Consumer)3 z: 2 composition: Device/Client alpha: 255 format:  Y_CBCR_420_VENUS_UBWC dataspace:0x10810000 transform: 0/0/0 buffer_id: 0xb400007de3164dc0 secure: 0
+@T 1792718552396 1792718552536
+layer: 96409 name: fa78fa6 SurfaceView[dev.foxyz.media_kit_bench/dev.foxyz.media_kit_bench.MainActivity]#3(BLAST Consumer)3 z: 2 composition: Device/Device alpha: 255 format:  Y_CBCR_420_VENUS_UBWC dataspace:0x10810000 transform: 0/0/0 buffer_id: 0xb400007de318d140 secure: 0
+@T 1792718553896 1792718554038
+layer: 96409 name: fa78fa6 SurfaceView[dev.foxyz.media_kit_bench/dev.foxyz.media_kit_bench.MainActivity]#3(BLAST Consumer)3 z: 2 composition: Device/Device alpha: 255 format:  Y_CBCR_420_VENUS_UBWC dataspace:0x10810000 transform: 0/0/0 buffer_id: 0xb400007de318cb10 secure: 0
+@T 1792718555396 1792718555555
+layer: 96409 name: fa78fa6 SurfaceView[dev.foxyz.media_kit_bench/dev.foxyz.media_kit_bench.MainActivity]#3(BLAST Consumer)3 z: 2 composition: Device/Client alpha: 255 format:  Y_CBCR_420_VENUS_UBWC dataspace:0x10810000 transform: 0/0/0 buffer_id: 0xb400007de318c060 secure: 0
+@T 1792718556896 1792718557042
+@T 1792718558397 1792718558512
+@T 1792718559897 1792718560011
+@T 1792718561397 1792718561596
+@T 1792718562897 1792718563006
+@T 1792718564397 1792718564510
+@T 1792718565897 1792718565997
