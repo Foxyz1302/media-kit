@@ -53,6 +53,12 @@ Assume the apps mostly use custom overlays, so the core must be cheap for them.
 - **Android:** keep the current binary for development. Before the first mobile release, ship our own build from Predidit's scripts, pinned to stable mpv/FFmpeg, with libplacebo built for OpenGL only. Fallback: Predidit v1.3.1 (minSdk 26).
 - **Linux:** system libmpv until AppImage/Flatpak packaging. Never ship the GPL Linux bundle.
 
+## CI and integration
+- No Apple jobs in CI.
+- `ci.yml` runs on push only for `main` and `integration`, and on pull requests. Lane branches run it on demand: `gh workflow run ci.yml --ref <branch>`. The Linux teardown stress runs on push to `main`/`integration` when `media_kit_video/linux/**` or `media_kit_test/**` changes, and on demand.
+- One run per ref: a new push cancels the run still in progress.
+- The freeKC Windows libmpv (`windows-render` 21704bb6, and d1c5667b, which runs the Windows tests on it) waits for a default CA bundle. That mpv verifies TLS by default and its OpenSSL finds no CA store on Windows, so every HTTPS stream fails. The core lane owns setting `tls-ca-file` in `real.dart`; the two commits go into `integration` after that.
+
 ## Other
 - Raising the minimum SDK for native assets is fine; Flutter 3.44+ is already required.
 - Vulkan/gpu-next is not pursued: Android zero-copy decoding is GL-only, and Anime4K works over OpenGL.
