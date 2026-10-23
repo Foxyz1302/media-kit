@@ -25,6 +25,8 @@ import 'package:media_kit_video/media_kit_video.dart';
 //   BENCH_PASSES=portrait               BENCH_MPV_LOG=v
 //   BENCH_TRACE=true  (media_kit runs also report time-pos every 50 ms from
 //                      open() and every mpv log line with its offset in ms)
+//   BENCH_VIEWS=full,small  (small: the whole run in the corner mini-player rect,
+//                      30% of the width; default full)
 
 const _host = 'http://127.0.0.1:8787';
 const _allClips = [
@@ -59,7 +61,8 @@ const _liveHlsUrl = String.fromEnvironment('BENCH_LIVE_HLS', defaultValue: '$_ho
 // (https://devstreaming-cdn.apple.com/videos/streaming/examples/bipbop_16x9/bipbop_16x9_variant.m3u8)
 // works too, if the phone's own connection loads its variants fast enough.
 const _vodHlsUrl = String.fromEnvironment('BENCH_VOD_HLS', defaultValue: '$_host/clips/vod.m3u8');
-const _version = 4;
+const _viewsDefine = String.fromEnvironment('BENCH_VIEWS');
+const _version = 5;
 
 List<String> _csv(String s) => [for (final e in s.split(',')) if (e.trim().isNotEmpty) e.trim()];
 
@@ -71,6 +74,7 @@ final List<BenchConfig> _configs = _configsDefine.isEmpty
 final List<String> _passes = _passesDefine.isEmpty ? const ['portrait', 'landscape'] : _csv(_passesDefine);
 final MPVLogLevel _mpvLogLevel = MPVLogLevel.values.byName(_mpvLogDefine);
 final Set<BenchConfig> _animated = {for (final n in _csv(_animateDefine)) BenchConfig.values.byName(n)};
+final List<String> _views = _viewsDefine.isEmpty ? const ['full'] : _csv(_viewsDefine);
 
 const _hostAttachDelay = Duration(seconds: 6);
 const _ttffTimeout = Duration(seconds: 20);
@@ -236,6 +240,8 @@ class BenchPage extends StatefulWidget {
 class _BenchPageState extends State<BenchPage> with TickerProviderStateMixin {
   Widget? _video;
   bool _overlay = false;
+  // BENCH_VIEWS=small: the run stays in the mini-player rect and skips the animated window.
+  bool _small = false;
   // 0 = full screen, 1 = corner mini-player; driven only during an animated window.
   late final AnimationController _mini = AnimationController(vsync: this, duration: const Duration(seconds: 1));
   String _status = 'waiting for host';
@@ -284,6 +290,7 @@ class _BenchPageState extends State<BenchPage> with TickerProviderStateMixin {
       'trace': _trace,
       'mpvLog': _mpvLogLevel.name,
       'animated': [for (final c in _animated) c.name],
+      'views': _views,
       'linkTest': _linkTestClip,
       'hcppActive': hcpp,
       'refreshRate': view.display.refreshRate,
@@ -307,33 +314,40 @@ class _BenchPageState extends State<BenchPage> with TickerProviderStateMixin {
       await _setOrientation(pass);
       for (final clip in _clips) {
         for (final cfg in _configs) {
-          final viewSize = _viewSize();
-          Map<String, dynamic> result;
-          try {
-            result = cfg == BenchConfig.native || cfg == BenchConfig.nativeTexture
-                ? await _runNative(clip, cfg, nativeId++)
-                : await _runMediaKit(clip, cfg);
-          } catch (e, st) {
-            result = {
-              'ok': false,
-              'error': 'exception: $e',
-              'stack': st.toString().split('\n').take(6).join(' | '),
-            };
-            if (mounted) {
-              setState(() {
-                _video = null;
-                _overlay = false;
-              });
+          for (final benchView in _views) {
+            final viewSize = _viewSize();
+            _small = benchView == 'small';
+            _mini.value = _small ? 1 : 0;
+            Map<String, dynamic> result;
+            try {
+              result = cfg == BenchConfig.native || cfg == BenchConfig.nativeTexture
+                  ? await _runNative(clip, cfg, nativeId++)
+                  : await _runMediaKit(clip, cfg);
+            } catch (e, st) {
+              result = {
+                'ok': false,
+                'error': 'exception: $e',
+                'stack': st.toString().split('\n').take(6).join(' | '),
+              };
+              if (mounted) {
+                setState(() {
+                  _video = null;
+                  _overlay = false;
+                });
+              }
+              await Future<void>.delayed(_gap);
             }
-            await Future<void>.delayed(_gap);
+            result['type'] = 'run';
+            result['version'] = _version;
+            result['pass'] = pass;
+            result['viewSize'] = viewSize;
+            result['clip'] = clip;
+            result['config'] = cfg.name;
+            result['view'] = benchView;
+            _small = false;
+            _mini.value = 0;
+            await _post(result);
           }
-          result['type'] = 'run';
-          result['version'] = _version;
-          result['pass'] = pass;
-          result['viewSize'] = viewSize;
-          result['clip'] = clip;
-          result['config'] = cfg.name;
-          await _post(result);
         }
       }
     }
@@ -524,6 +538,21 @@ class _BenchPageState extends State<BenchPage> with TickerProviderStateMixin {
 
   Future<double> _timePos(NativePlayer np) async => double.tryParse(await _prop(np, 'time-pos')) ?? 0;
 
+  /// mpv's GPU time per fresh frame (vo-passes, GL timer queries): the sum of every pass's average & peak,
+  /// in ms, & the passes' descriptions.
+  Future<Map<String, dynamic>> _gpuPasses(NativePlayer np) async {
+    final count = int.tryParse(await _prop(np, 'vo-passes/fresh/count')) ?? 0;
+    var avg = 0.0;
+    var peak = 0.0;
+    final desc = <String>[];
+    for (var i = 0; i < count; i++) {
+      avg += (int.tryParse(await _prop(np, 'vo-passes/fresh/$i/avg')) ?? 0) / 1e6;
+      peak += (int.tryParse(await _prop(np, 'vo-passes/fresh/$i/peak')) ?? 0) / 1e6;
+      desc.add(await _prop(np, 'vo-passes/fresh/$i/desc'));
+    }
+    return {'passes': count, 'freshAvgMs': _r2(avg), 'freshPeakSumMs': _r2(peak), 'desc': desc};
+  }
+
   Future<Map<String, dynamic>> _runMediaKit(String clip, BenchConfig cfg) async {
     final player = Player(configuration: PlayerConfiguration(logLevel: _mpvLogLevel));
     final np = player.platform as NativePlayer;
@@ -610,6 +639,7 @@ class _BenchPageState extends State<BenchPage> with TickerProviderStateMixin {
       await Future<void>.delayed(_plainWindow);
       final t1 = developer.Timeline.now;
       final c1 = await _props(np, counters);
+      result['gpu'] = await _gpuPasses(np);
       setState(() => _overlay = true);
       await Future<void>.delayed(_overlayWindow);
       final t2 = developer.Timeline.now;
@@ -617,7 +647,7 @@ class _BenchPageState extends State<BenchPage> with TickerProviderStateMixin {
       win = [t0, t1, t2];
       pos = [for (final c in [c0, c1, c2]) double.tryParse(c['time-pos'] ?? '') ?? 0];
       result['counters'] = {'start': c0, 'plainEnd': c1, 'overlayEnd': c2};
-      if (_animated.contains(cfg)) {
+      if (_animated.contains(cfg) && !_small) {
         animatedPhase = await _animatedPhase(() => _timePos(np));
         result['counters']['animatedEnd'] = await _props(np, counters);
       }
@@ -625,6 +655,9 @@ class _BenchPageState extends State<BenchPage> with TickerProviderStateMixin {
     result['info'] = await _props(np, [
       'hwdec-current',
       'current-vo',
+      'android-surface-size',
+      'osd-dimensions/w',
+      'osd-dimensions/h',
       'video-codec',
       'container-fps',
       'video-params/w',
@@ -732,7 +765,7 @@ class _BenchPageState extends State<BenchPage> with TickerProviderStateMixin {
       win = [t0, t1, t2];
       pos = [p0, p1, p2];
       result['positionsMs'] = pos;
-      if (_animated.contains(cfg)) {
+      if (_animated.contains(cfg) && !_small) {
         animatedPhase = await _animatedPhase(() async => c.currentPosition.inMilliseconds / 1000);
       }
     }
