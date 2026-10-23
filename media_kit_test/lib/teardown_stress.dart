@@ -19,8 +19,8 @@
 ///   STRESS_SEED             random seed
 ///   STRESS_BENCH_SECONDS    bench: measured seconds (20)
 ///   STRESS_SIZE             bench, shot: fixed output size, WIDTHxHEIGHT
-///   STRESS_SHOT             shot: PNG of mpv's output at 0.5 s of the first
-///                           clip, as rendered into the texture
+///   STRESS_SHOT             shot: PNG of the texture at 0.5 s of the first
+///                           clip, as Flutter draws it, 2x a 640x360 lane
 ///   STRESS_MPV_LOG          mpv messages logged from this level (error)
 ///   STRESS_HWDEC            hwdec of the video controllers (auto)
 ///   STRESS_SIZES            setSize choices: video or WIDTHxHEIGHT, comma
@@ -34,8 +34,10 @@ import 'dart:async';
 import 'dart:ffi' show DynamicLibrary, DynamicLibraryExtension, Int32, Void;
 import 'dart:io';
 import 'dart:math';
+import 'dart:ui' show ImageByteFormat;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
@@ -114,6 +116,7 @@ class _StressScreenState extends State<StressScreen>
     vsync: this,
     duration: const Duration(seconds: 1),
   )..repeat();
+  final _shotKey = GlobalKey();
   final _random = Random(_seed);
   final _stopwatch = Stopwatch()..start();
   var _status = '';
@@ -413,11 +416,16 @@ class _StressScreenState extends State<StressScreen>
   Future<void> _shot() async {
     final player = _player();
     final controller = _controller(player);
-    _update(() => _lane[0].controller = controller);
+    _update(() {
+      _lane[0].controller = controller;
+      _lane[0].size = const Size(640, 360);
+    });
     final native = player.platform as NativePlayer;
     await native.setProperty('dither-depth', 'no');
-    await player.open(Media(_clips.first), play: false);
-    await player.seek(const Duration(milliseconds: 500));
+    await player.open(
+      Media(_clips.first, start: const Duration(milliseconds: 500)),
+      play: false,
+    );
     final shaders = _shaders;
     if (shaders != null) {
       await native.setProperty('glsl-shaders', shaders);
@@ -427,10 +435,13 @@ class _StressScreenState extends State<StressScreen>
       await controller.setSize(width: size[0], height: size[1]);
     }
     await Future.delayed(const Duration(seconds: 3));
+    final boundary =
+        _shotKey.currentContext!.findRenderObject() as RenderRepaintBoundary;
+    final image = await boundary.toImage(pixelRatio: 2.0);
+    final png = await image.toByteData(format: ImageByteFormat.png);
     final path = _environment['STRESS_SHOT'] ?? 'shot.png';
-    await native.command(['screenshot-to-file', path, 'window']);
-    await Future.delayed(const Duration(seconds: 1));
-    _log('shot $path');
+    File(path).writeAsBytesSync(png!.buffer.asUint8List());
+    _log('shot $path ${image.width}x${image.height}');
     _update(() => _lane[0].controller = null);
     await Future.delayed(const Duration(milliseconds: 300));
     await player.dispose();
@@ -451,12 +462,15 @@ class _StressScreenState extends State<StressScreen>
                 SizedBox(
                   width: lane.size.width,
                   height: lane.size.height,
-                  child: lane.controller != null && lane.visible
-                      ? Video(
-                          controller: lane.controller!,
-                          controls: NoVideoControls,
-                        )
-                      : const ColoredBox(color: Color(0xFF202020)),
+                  child: RepaintBoundary(
+                    key: lane == _lane.first ? _shotKey : null,
+                    child: lane.controller != null && lane.visible
+                        ? Video(
+                            controller: lane.controller!,
+                            controls: NoVideoControls,
+                          )
+                        : const ColoredBox(color: Color(0xFF202020)),
+                  ),
                 ),
             ],
           ),
