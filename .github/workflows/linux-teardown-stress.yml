@@ -34,9 +34,11 @@ jobs:
         run: git checkout 9c0eef46 -- ../media_kit_video/linux
       - run: sudo apt-get update
       - run: >
-          sudo apt-get install -y clang cmake ninja-build pkg-config
+          sudo apt-get install -y -o Acquire::Retries=3
+          clang cmake ninja-build pkg-config
           libgtk-3-dev libmpv-dev libepoxy-dev ffmpeg xvfb xauth gdb
           libgl1-mesa-dri libegl-mesa0
+        timeout-minutes: 10
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: "3.47.7"
@@ -63,6 +65,7 @@ jobs:
           GDK_BACKEND=x11 xvfb-run -a "$RUNNER_TEMP/isolated_egl_test"
       - name: Stress, 3 runs of 5 lanes x 25 iterations
         run: |
+          set +e +o pipefail
           sudo sysctl -w kernel.core_pattern="$RUNNER_TEMP/core.%p"
           ulimit -c unlimited
           export STRESS_CLIPS="$RUNNER_TEMP/clips/640x360.mp4,$RUNNER_TEMP/clips/854x480.mp4"
@@ -85,6 +88,10 @@ jobs:
               echo "::error::run $run never rendered through the isolated EGL context"
               failed=1
             fi
+            if grep -qE "freed without its EGL context|media_kit: TextureGL:" "$log"; then
+              echo "::error::run $run made the isolated EGL context current while another thread had it"
+              failed=1
+            fi
             if [ $status -ne 0 ]; then
               echo "::error::run $run exited with $status"
               failed=1
@@ -101,6 +108,21 @@ jobs:
             fi
           done
           exit $failed
+      - name: FrameTiming under llvmpipe, 2 players for 20 s (informational)
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        env:
+          STRESS_MODE: bench
+          STRESS_LANES: "2"
+          STRESS_BENCH_SECONDS: "20"
+        run: |
+          set +e +o pipefail
+          export STRESS_CLIPS="$RUNNER_TEMP/clips/640x360.mp4,$RUNNER_TEMP/clips/854x480.mp4"
+          timeout -s KILL 300 xvfb-run -a -s "-screen 0 1280x720x24" \
+            build/linux/x64/debug/bundle/media_kit_test > "$RUNNER_TEMP/stress-bench.log" 2>&1
+          status=$?
+          grep -E "^stress: (bench|PASS|FAIL|exit)|H/W rendering" "$RUNNER_TEMP/stress-bench.log" | sort | uniq -c
+          exit $status
       - uses: actions/upload-artifact@v7
         if: always()
         with:
