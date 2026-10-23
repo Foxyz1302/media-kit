@@ -35,6 +35,7 @@ struct _VideoOutput {
   gpointer texture_update_callback_context;
   FlTextureRegistrar* texture_registrar;
   gboolean destroyed;
+  gboolean gpu_rendering; /* H/W rendering on a GPU, not a software rasterizer. */
 };
 
 G_DEFINE_TYPE(VideoOutput, video_output, G_TYPE_OBJECT)
@@ -130,7 +131,16 @@ static void video_output_init(VideoOutput* self) {
   self->texture_update_callback_context = NULL;
   self->texture_registrar = NULL;
   self->destroyed = FALSE;
+  self->gpu_rendering = FALSE;
   g_mutex_init(&self->mutex);
+}
+
+// mpv's own test for a software rasterizer (is_software_gl, opengl/common.c)
+static gboolean video_output_is_software_renderer(const gchar* renderer) {
+  return renderer == NULL || g_strcmp0(renderer, "Software Rasterizer") == 0 ||
+         strstr(renderer, "llvmpipe") != NULL ||
+         strstr(renderer, "softpipe") != NULL ||
+         g_strcmp0(renderer, "Mesa X11") == 0;
 }
 
 // Since Flutter 3.38 the engine's EGL context is current on the raster thread
@@ -275,6 +285,8 @@ VideoOutput* video_output_new(FlTextureRegistrar* texture_registrar,
                     },
                     self);
                 hardware_acceleration_supported = TRUE;
+                self->gpu_rendering =
+                    !video_output_is_software_renderer(renderer);
                 // The path, the windowing system and the OpenGL renderer
                 // (llvmpipe is Mesa's software renderer)
                 g_print(
@@ -533,6 +545,10 @@ gint64 video_output_get_texture_id(VideoOutput* self) {
   }
   g_assert_not_reached();
   return -1;
+}
+
+gboolean video_output_get_gpu_rendering(VideoOutput* self) {
+  return self->gpu_rendering;
 }
 
 void video_output_notify_texture_update(VideoOutput* self) {
