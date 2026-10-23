@@ -52,6 +52,13 @@ void main() {
       expect(Media.normalizeURI(test), equals(source));
       expect(Media(test).uri, equals(source));
     }
+    // Path: \\?\ prefix
+    for (final source in sources.file) {
+      final test = '\\\\?\\${source.replaceAll('/', r'\')}';
+      print(test);
+      expect(Media.normalizeURI(test), equals(source));
+      expect(Media(test).uri, equals(source));
+    }
     // file:/// URI
     for (final source in sources.file) {
       final test = Uri.file(source).toString();

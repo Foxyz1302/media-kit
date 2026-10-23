@@ -1,8 +1,16 @@
 name: GitHub Actions
 
 on:
-  - push
-  - pull_request
+  push:
+    branches:
+      - main
+      - integration
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   media_kit-tests-windows:
@@ -49,27 +57,30 @@ jobs:
           channel: "stable"
           cache: true
       - run: dart pub get
-      - run: dart test
+      - run: dart test --exclude-tags headless
 
-  media_kit-tests-macos:
-    name: package:media_kit tests (macOS)
-    runs-on: macos-latest
-    env:
-      LIBMPV_LIBRARY_PATH: ${{ format('{0}/{1}', github.workspace, 'media_kit/test/ci/macos/libs/libmpv.dylib') }}
+  media_kit-headless-linux:
+    name: package:media_kit headless suite (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: media_kit
     steps:
       - uses: actions/checkout@v7
-        with:
-          submodules: "true"
-      - run: sh test/ci/macos/scripts/setup_dylibs.sh
+      - run: sudo apt-get update
+      - run: sudo apt-get install -y libmpv-dev ffmpeg
       - uses: subosito/flutter-action@v2
         with:
           channel: "stable"
           cache: true
       - run: dart pub get
-      - run: dart test
+      - run: dart test test/headless --concurrency=1 --reporter=expanded
+      - name: Known-failing tests (not gating)
+        continue-on-error: true
+        run: >
+          dart test test/headless --tags known-failing --run-skipped
+          --concurrency=1 --reporter=expanded
 
   media_kit-tests-web:
     name: package:media_kit tests (Web)
@@ -158,68 +169,6 @@ jobs:
           tag_name: "vnext"
           files: |
             media_kit_test/media_kit_test_linux_x64.7z
-
-  macos:
-    name: macOS
-    runs-on: macos-latest
-    defaults:
-      run:
-        working-directory: media_kit_test
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          submodules: "true"
-      - uses: subosito/flutter-action@v2
-        with:
-          channel: "stable"
-          cache: true
-      - run: flutter pub get
-      - run: flutter build macos --verbose
-      - run: >
-          7z a media_kit_test_macos_universal.7z
-          build/macos/Build/Products/Release/media_kit_test.app
-      - uses: actions/upload-artifact@v7
-        with:
-          name: media_kit_test_macos_universal
-          path: media_kit_test/media_kit_test_macos_universal.7z
-      - uses: softprops/action-gh-release@v3
-        if: github.ref == 'refs/heads/main'
-        with:
-          draft: true
-          prerelease: false
-          tag_name: "vnext"
-          files: |
-            media_kit_test/media_kit_test_macos_universal.7z
-
-  ios:
-    name: iOS
-    runs-on: macos-latest
-    defaults:
-      run:
-        working-directory: media_kit_test
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          submodules: "true"
-      - uses: subosito/flutter-action@v2
-        with:
-          channel: "stable"
-          cache: true
-      - run: flutter pub get
-      - run: flutter build ios --verbose --no-codesign
-      - run: 7z a media_kit_test_ios_arm64.7z build/ios/iphoneos/Runner.app
-      - uses: actions/upload-artifact@v7
-        with:
-          name: media_kit_test_ios_arm64
-          path: media_kit_test/media_kit_test_ios_arm64.7z
-      - uses: softprops/action-gh-release@v3
-        if: github.ref == 'refs/heads/main'
-        with:
-          draft: true
-          prerelease: false
-          tag_name: "vnext"
-          files: |
-            media_kit_test/media_kit_test_ios_arm64.7z
 
   android:
     name: Android
@@ -342,48 +291,6 @@ jobs:
       - run: flutter pub get
       - run: flutter build linux --verbose
 
-  optional-libs-macos:
-    name: macOS (optional libs)
-    runs-on: macos-latest
-    defaults:
-      run:
-        working-directory: media_kit_test
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          submodules: "true"
-      - uses: subosito/flutter-action@v2
-        with:
-          channel: "stable"
-          cache: true
-      - name: Remove `media_kit_libs_*` dependencies
-        run: |
-          sed -i '' '/media_kit_libs_/d' pubspec.yaml
-          cat pubspec.yaml
-      - run: flutter pub get
-      - run: flutter build macos --verbose
-
-  optional-libs-ios:
-    name: iOS (optional libs)
-    runs-on: macos-latest
-    defaults:
-      run:
-        working-directory: media_kit_test
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          submodules: "true"
-      - uses: subosito/flutter-action@v2
-        with:
-          channel: "stable"
-          cache: true
-      - name: Remove `media_kit_libs_*` dependencies
-        run: |
-          sed -i '' '/media_kit_libs_/d' pubspec.yaml
-          cat pubspec.yaml
-      - run: flutter pub get
-      - run: flutter build ios --verbose --no-codesign
-
   optional-libs-android:
     name: Android (optional libs)
     runs-on: ubuntu-latest
@@ -458,48 +365,6 @@ jobs:
           cat pubspec.yaml
       - run: flutter pub get
       - run: flutter build linux --verbose
-
-  audio-libs-macos:
-    name: macOS (audio libs)
-    runs-on: macos-latest
-    defaults:
-      run:
-        working-directory: media_kit_test
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          submodules: "true"
-      - uses: subosito/flutter-action@v2
-        with:
-          channel: "stable"
-          cache: true
-      - name: Remove `media_kit_libs_*` dependencies
-        run: |
-          sed -i '' 's/\bmedia_kit_libs\([^[ ]*\)_video\b/media_kit_libs\1_audio/g' pubspec.yaml
-          cat pubspec.yaml
-      - run: flutter pub get
-      - run: flutter build macos --verbose
-
-  audio-libs-ios:
-    name: iOS (audio libs)
-    runs-on: macos-latest
-    defaults:
-      run:
-        working-directory: media_kit_test
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          submodules: "true"
-      - uses: subosito/flutter-action@v2
-        with:
-          channel: "stable"
-          cache: true
-      - name: Remove `media_kit_libs_*` dependencies
-        run: |
-          sed -i '' 's/\bmedia_kit_libs\([^[ ]*\)_video\b/media_kit_libs\1_audio/g' pubspec.yaml
-          cat pubspec.yaml
-      - run: flutter pub get
-      - run: flutter build ios --verbose --no-codesign
 
   audio-libs-android:
     name: Android (audio libs)

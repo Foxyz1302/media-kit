@@ -18,6 +18,48 @@
 #define SW_RENDERING_PIXEL_BUFFER_SIZE \
   (SW_RENDERING_MAX_WIDTH) * (SW_RENDERING_MAX_HEIGHT) * (4)
 
+namespace {
+
+struct VideoDimensions {
+  int64_t width = 0;
+  int64_t height = 0;
+};
+
+VideoDimensions GetVideoDimensions(mpv_handle* handle) {
+  mpv_node params{};
+  if (mpv_get_property(handle, "video-out-params", MPV_FORMAT_NODE, &params) <
+      0) {
+    return {};
+  }
+
+  int64_t dw = 0, dh = 0, rotate = 0;
+  if (params.format == MPV_FORMAT_NODE_MAP && params.u.list != nullptr) {
+    for (int32_t i = 0; i < params.u.list->num; i++) {
+      char* key = params.u.list->keys[i];
+      auto value = params.u.list->values[i];
+      if (value.format == MPV_FORMAT_INT64) {
+        if (strcmp(key, "dw") == 0) {
+          dw = value.u.int64;
+        }
+        if (strcmp(key, "dh") == 0) {
+          dh = value.u.int64;
+        }
+        if (strcmp(key, "rotate") == 0) {
+          rotate = value.u.int64;
+        }
+      }
+    }
+  }
+  mpv_free_node_contents(&params);
+
+  if (rotate == 0 || rotate == 180) {
+    return {dw, dh};
+  }
+  return {dh, dw};
+}
+
+}  // namespace
+
 VideoOutput::VideoOutput(int64_t handle,
                          VideoOutputConfiguration configuration,
                          flutter::PluginRegistrarWindows* registrar,
@@ -151,9 +193,11 @@ VideoOutput::~VideoOutput() {
   promise.get_future().wait();
   texture_id_ = 0;
 
-  thread_pool_ref_->Post([render_context = render_context_]() {
-    mpv_render_context_free(render_context);
-  });
+  thread_pool_ref_
+      ->Post([render_context = render_context_]() {
+        mpv_render_context_free(render_context);
+      })
+      .wait();
 }
 
 void VideoOutput::NotifyRender() {
@@ -424,34 +468,7 @@ int64_t VideoOutput::GetVideoWidth() {
     return width_.value();
   }
   // Video resolution dependent width.
-  int64_t width = 0;
-  int64_t height = 0;
-
-  mpv_node params;
-  mpv_get_property(handle_, "video-out-params", MPV_FORMAT_NODE, &params);
-
-  int64_t dw = 0, dh = 0, rotate = 0;
-  if (params.format == MPV_FORMAT_NODE_MAP) {
-    for (int32_t i = 0; i < params.u.list->num; i++) {
-      char* key = params.u.list->keys[i];
-      auto value = params.u.list->values[i];
-      if (value.format == MPV_FORMAT_INT64) {
-        if (strcmp(key, "dw") == 0) {
-          dw = value.u.int64;
-        }
-        if (strcmp(key, "dh") == 0) {
-          dh = value.u.int64;
-        }
-        if (strcmp(key, "rotate") == 0) {
-          rotate = value.u.int64;
-        }
-      }
-    }
-    mpv_free_node_contents(&params);
-  }
-
-  width = rotate == 0 || rotate == 180 ? dw : dh;
-  height = rotate == 0 || rotate == 180 ? dh : dw;
+  const auto [width, height] = GetVideoDimensions(handle_);
 
   if (pixel_buffer_ != nullptr) {
     // Make sure |width| & |height| fit between |SW_RENDERING_MAX_WIDTH| &
@@ -473,34 +490,7 @@ int64_t VideoOutput::GetVideoHeight() {
     return height_.value();
   }
   // Video resolution dependent height.
-  int64_t width = 0;
-  int64_t height = 0;
-
-  mpv_node params;
-  mpv_get_property(handle_, "video-out-params", MPV_FORMAT_NODE, &params);
-
-  int64_t dw = 0, dh = 0, rotate = 0;
-  if (params.format == MPV_FORMAT_NODE_MAP) {
-    for (int32_t i = 0; i < params.u.list->num; i++) {
-      char* key = params.u.list->keys[i];
-      auto value = params.u.list->values[i];
-      if (value.format == MPV_FORMAT_INT64) {
-        if (strcmp(key, "dw") == 0) {
-          dw = value.u.int64;
-        }
-        if (strcmp(key, "dh") == 0) {
-          dh = value.u.int64;
-        }
-        if (strcmp(key, "rotate") == 0) {
-          rotate = value.u.int64;
-        }
-      }
-    }
-    mpv_free_node_contents(&params);
-  }
-
-  width = rotate == 0 || rotate == 180 ? dw : dh;
-  height = rotate == 0 || rotate == 180 ? dh : dw;
+  const auto [width, height] = GetVideoDimensions(handle_);
 
   if (pixel_buffer_ != NULL) {
     // Make sure |width| & |height| fit between |SW_RENDERING_MAX_WIDTH| &
