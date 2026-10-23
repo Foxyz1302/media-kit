@@ -1,0 +1,9 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Merged only when building with -P benchHcpp=true (see app/build.gradle.kts). FlutterLoader reads
+         engine flags from the application's meta-data, so this must sit under <application>. -->
+    <application>
+        <meta-data
+            android:name="io.flutter.embedding.android.EnableHcpp"
+            android:value="true" />
+    </application>
+</manifest>

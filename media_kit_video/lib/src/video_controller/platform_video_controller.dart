@@ -132,11 +132,17 @@ class VideoControllerConfiguration {
   /// the display's physical size & never goes below the video's own size, unless the widget shows the
   /// video smaller than that.
   ///
-  /// Applies on GNU/Linux & Windows, when the video renders on a GPU & while no [width] & [height] are set,
+  /// Applies on GNU/Linux, Windows & Android, when the video renders on a GPU & while no [width] & [height] are set,
   /// here or through [VideoController.setSize]. `true` or `false` sets it; `null` leaves it to the platform.
+  ///
+  /// On Android the output is never larger than the video's own size (within the display): a 4K video in a
+  /// small view renders at the view's size. Every resize there is a new `Surface`, on which mpv re-creates
+  /// its video output, so a settled size is applied only when it differs by more than a tenth; a new file
+  /// is sized from the views at once. Applies with [vo] `gpu`.
   ///
   /// Default (`null`):
   /// * GNU/Linux : on
+  /// * Android : on
   /// * Windows : off, since a resize there still replaces the texture (a blank frame) & waits for mpv's
   ///   next frame
   final bool? renderAtWidgetSize;
