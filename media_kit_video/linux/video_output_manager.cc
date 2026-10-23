@@ -68,6 +68,16 @@ void video_output_manager_set_size(VideoOutputManager* self,
   }
 }
 
+gboolean video_output_manager_get_gpu_rendering(VideoOutputManager* self,
+                                                gint64 handle) {
+  if (g_hash_table_contains(self->video_outputs, GINT_TO_POINTER(handle))) {
+    VideoOutput* video_output = VIDEO_OUTPUT(
+        g_hash_table_lookup(self->video_outputs, GINT_TO_POINTER(handle)));
+    return video_output_get_gpu_rendering(video_output);
+  }
+  return FALSE;
+}
+
 void video_output_manager_dispose(VideoOutputManager* self, gint64 handle) {
   if (g_hash_table_contains(self->video_outputs, GINT_TO_POINTER(handle))) {
     g_hash_table_remove(self->video_outputs, GINT_TO_POINTER(handle));

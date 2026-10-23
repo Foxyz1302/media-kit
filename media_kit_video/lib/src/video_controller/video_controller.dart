@@ -32,7 +32,7 @@ import 'package:media_kit_video/src/video_controller/web_video_controller/web_vi
 ///
 /// 1. You can limit size of the video output by specifying [VideoControllerConfiguration.width] & [VideoControllerConfiguration.height].
 ///    * A smaller width & height may yield substantial performance improvements.
-///    * By default, both [VideoControllerConfiguration.height] & [VideoControllerConfiguration.width] are `null` i.e. output is based on video's resolution.
+///    * By default, both [VideoControllerConfiguration.height] & [VideoControllerConfiguration.width] are `null` i.e. output is based on video's resolution, or on GNU/Linux (& on Windows when enabled) on the size the `Video` widget shows it at (see [VideoControllerConfiguration.renderAtWidgetSize]).
 /// 2. You can reduce scale of the video output by specifying [VideoControllerConfiguration.scale].
 ///    * A smaller scale may yield substantial performance improvements. Specifying this value will cause [VideoControllerConfiguration.width] & [VideoControllerConfiguration.height] to be ignored.
 ///    * By default, [VideoControllerConfiguration.scale] is `1.0` i.e. output is based on video's resolution.
@@ -67,6 +67,9 @@ class VideoController {
 
   /// [Rect] of the video output, received from the native implementation.
   final ValueNotifier<Rect?> rect = ValueNotifier<Rect?>(null);
+
+  /// Views given to [setViewSize] before [platform] was up.
+  final _viewSizes = <Object, ({Size size, BoxFit fit, double? aspectRatio})>{};
 
   /// {@macro video_controller}
   VideoController(
@@ -105,6 +108,15 @@ class VideoController {
         if (platform.isCompleted) {
           // Populate [id] & [rect] [ValueNotifier]s with the values from [platform] implementation of [PlatformVideoController].
           final controller = await platform.future;
+          for (final MapEntry(key: view, value: size) in _viewSizes.entries) {
+            controller.setViewSize(
+              view,
+              size.size,
+              fit: size.fit,
+              aspectRatio: size.aspectRatio,
+            );
+          }
+          _viewSizes.clear();
           // Add listeners.
           void fn0() => id.value = controller.id.value;
           void fn1() => rect.value = controller.rect.value;
@@ -151,6 +163,28 @@ class VideoController {
   Future<void> setSize({int? width, int? height}) async {
     final instance = await platform.future;
     return instance.setSize(width: width, height: height);
+  }
+
+  /// Tells the video output the [size], in physical pixels, at which [view] shows it, & how: [fit] &
+  /// [aspectRatio] as given to the `Video` widget. Null once [view] no longer shows it.
+  ///
+  /// The `Video` widget does this by itself, for [VideoControllerConfiguration.renderAtWidgetSize]; an app
+  /// that draws [id]'s texture with its own widgets may do the same.
+  void setViewSize(
+    Object view,
+    Size? size, {
+    BoxFit fit = BoxFit.contain,
+    double? aspectRatio,
+  }) {
+    final controller = notifier.value;
+    if (controller != null) {
+      _viewSizes.remove(view);
+      controller.setViewSize(view, size, fit: fit, aspectRatio: aspectRatio);
+    } else if (size == null) {
+      _viewSizes.remove(view);
+    } else {
+      _viewSizes[view] = (size: size, fit: fit, aspectRatio: aspectRatio);
+    }
   }
 
   /// A [Future] that completes when the first video frame has been rendered.

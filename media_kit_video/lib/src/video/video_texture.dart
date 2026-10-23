@@ -238,6 +238,10 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
   void didUpdateWidget(Video oldWidget) {
     super.didUpdateWidget(oldWidget);
 
+    if (oldWidget.controller != widget.controller) {
+      oldWidget.controller.setViewSize(this, null);
+    }
+
     final currentParams = videoViewParametersNotifier.value;
 
     final newParams = currentParams.copyWith(
@@ -344,6 +348,7 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    widget.controller.setViewSize(this, null);
     WidgetsBinding.instance.removeObserver(this);
     _wakelock.disable();
     for (final subscription in _subscriptions) {
@@ -377,6 +382,12 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
             child: Stack(
               fit: StackFit.expand,
               children: [
+                _ViewSize(
+                  controller: widget.controller,
+                  view: this,
+                  fit: videoViewParameters.fit,
+                  aspectRatio: videoViewParameters.aspectRatio,
+                ),
                 ClipRect(
                   child: FittedBox(
                     fit: videoViewParameters.fit,
@@ -463,6 +474,112 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
 }
 
 typedef VideoControlsBuilder = Widget Function(VideoState state);
+
+/// Tells [controller] the physical size at which [view] shows its output, after each layout that changes it
+/// ([VideoController.setViewSize]). Paints nothing.
+class _ViewSize extends LeafRenderObjectWidget {
+  final VideoController controller;
+  final Object view;
+  final BoxFit fit;
+  final double? aspectRatio;
+
+  const _ViewSize({
+    required this.controller,
+    required this.view,
+    required this.fit,
+    required this.aspectRatio,
+  });
+
+  static double _devicePixelRatio(BuildContext context) =>
+      MediaQuery.maybeDevicePixelRatioOf(context) ??
+      View.of(context).devicePixelRatio;
+
+  @override
+  _RenderViewSize createRenderObject(BuildContext context) => _RenderViewSize(
+        controller: controller,
+        view: view,
+        fit: fit,
+        aspectRatio: aspectRatio,
+        devicePixelRatio: _devicePixelRatio(context),
+      );
+
+  @override
+  void updateRenderObject(BuildContext context, _RenderViewSize renderObject) {
+    renderObject.update(
+      controller: controller,
+      view: view,
+      fit: fit,
+      aspectRatio: aspectRatio,
+      devicePixelRatio: _devicePixelRatio(context),
+    );
+  }
+}
+
+class _RenderViewSize extends RenderBox {
+  VideoController _controller;
+  Object _view;
+  BoxFit _fit;
+  double? _aspectRatio;
+  double _devicePixelRatio;
+
+  _RenderViewSize({
+    required VideoController controller,
+    required Object view,
+    required BoxFit fit,
+    required double? aspectRatio,
+    required double devicePixelRatio,
+  })  : _controller = controller,
+        _view = view,
+        _fit = fit,
+        _aspectRatio = aspectRatio,
+        _devicePixelRatio = devicePixelRatio;
+
+  void update({
+    required VideoController controller,
+    required Object view,
+    required BoxFit fit,
+    required double? aspectRatio,
+    required double devicePixelRatio,
+  }) {
+    if (controller == _controller &&
+        view == _view &&
+        fit == _fit &&
+        aspectRatio == _aspectRatio &&
+        devicePixelRatio == _devicePixelRatio) {
+      return;
+    }
+    _controller = controller;
+    _view = view;
+    _fit = fit;
+    _aspectRatio = aspectRatio;
+    _devicePixelRatio = devicePixelRatio;
+    if (hasSize) {
+      _report();
+    }
+  }
+
+  void _report() {
+    _controller.setViewSize(
+      _view,
+      size * _devicePixelRatio,
+      fit: _fit,
+      aspectRatio: _aspectRatio,
+    );
+  }
+
+  @override
+  bool get sizedByParent => true;
+
+  @override
+  Size computeDryLayout(covariant BoxConstraints constraints) =>
+      constraints.biggest.isFinite ? constraints.biggest : constraints.smallest;
+
+  @override
+  void performResize() {
+    super.performResize();
+    _report();
+  }
+}
 
 // --------------------------------------------------
 
