@@ -71,11 +71,12 @@ class NativeVideoController extends PlatformVideoController {
   /// say, H/W rendering is taken for GPU rendering.
   late var _gpu = configuration.enableHardwareAcceleration;
 
-  /// Whether the output follows [_views]: [VideoControllerConfiguration.renderAtWidgetSize] on Windows &
-  /// GNU/Linux, rendering on a GPU, without a size set.
+  /// Whether the output follows [_views]: on GNU/Linux & Windows per
+  /// [VideoControllerConfiguration.renderAtWidgetSize] (by default on GNU/Linux only), rendering on a GPU,
+  /// without a size set.
   bool get _followsViews =>
-      configuration.renderAtWidgetSize &&
-      (Platform.isWindows || Platform.isLinux) &&
+      (Platform.isLinux || Platform.isWindows) &&
+      (configuration.renderAtWidgetSize ?? Platform.isLinux) &&
       _gpu &&
       (width == null || height == null);
 

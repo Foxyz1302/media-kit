@@ -132,11 +132,14 @@ class VideoControllerConfiguration {
   /// the display's physical size & never goes below the video's own size, unless the widget shows the
   /// video smaller than that.
   ///
-  /// Applies on Windows & GNU/Linux, when the video renders on a GPU & while no [width] & [height] are set,
-  /// here or through [VideoController.setSize].
+  /// Applies on GNU/Linux & Windows, when the video renders on a GPU & while no [width] & [height] are set,
+  /// here or through [VideoController.setSize]. `true` or `false` sets it; `null` leaves it to the platform.
   ///
-  /// Default: `true`
-  final bool renderAtWidgetSize;
+  /// Default (`null`):
+  /// * GNU/Linux : on
+  /// * Windows : off, since a resize there still replaces the texture (a blank frame) & waits for mpv's
+  ///   next frame
+  final bool? renderAtWidgetSize;
 
   /// {@macro video_controller_configuration}
   const VideoControllerConfiguration({
@@ -147,7 +150,7 @@ class VideoControllerConfiguration {
     this.scale = 1.0,
     this.enableHardwareAcceleration = true,
     this.androidAttachSurfaceAfterVideoParameters,
-    this.renderAtWidgetSize = true,
+    this.renderAtWidgetSize,
   });
 
   /// Returns a copy of this class with the given fields replaced by the new values.

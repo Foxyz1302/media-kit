@@ -32,7 +32,7 @@ import 'package:media_kit_video/src/video_controller/web_video_controller/web_vi
 ///
 /// 1. You can limit size of the video output by specifying [VideoControllerConfiguration.width] & [VideoControllerConfiguration.height].
 ///    * A smaller width & height may yield substantial performance improvements.
-///    * By default, both [VideoControllerConfiguration.height] & [VideoControllerConfiguration.width] are `null` i.e. output is based on video's resolution, or on Windows & GNU/Linux on the size the `Video` widget shows it at (see [VideoControllerConfiguration.renderAtWidgetSize]).
+///    * By default, both [VideoControllerConfiguration.height] & [VideoControllerConfiguration.width] are `null` i.e. output is based on video's resolution, or on GNU/Linux (& on Windows when enabled) on the size the `Video` widget shows it at (see [VideoControllerConfiguration.renderAtWidgetSize]).
 /// 2. You can reduce scale of the video output by specifying [VideoControllerConfiguration.scale].
 ///    * A smaller scale may yield substantial performance improvements. Specifying this value will cause [VideoControllerConfiguration.width] & [VideoControllerConfiguration.height] to be ignored.
 ///    * By default, [VideoControllerConfiguration.scale] is `1.0` i.e. output is based on video's resolution.

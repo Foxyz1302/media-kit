@@ -35,7 +35,7 @@ Future<NativeVideoController> _create(
   Player player, {
   int? width,
   int? height,
-  bool renderAtWidgetSize = true,
+  bool? renderAtWidgetSize,
 }) async {
   final controller = await NativeVideoController.create(
     player,
@@ -261,7 +261,7 @@ void main() {
       await _settled(controller);
       expect(_sizes, ['1280x720']);
     });
-  });
+  }, skip: !Platform.isLinux ? 'on by default on GNU/Linux only' : false);
 
   group('outputSizeFor', () {
     (int, int)? size(
