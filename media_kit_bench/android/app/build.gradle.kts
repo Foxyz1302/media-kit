@@ -47,3 +47,14 @@ kotlin {
 flutter {
     source = "../.."
 }
+
+// HCPP A/B: `flutter build apk -P benchHcpp=true` merges src/hcpp/AndroidManifest.xml, which opts into
+// Hybrid Composition++. Without the property the meta-data is absent; the code is the same either way.
+val benchHcpp = providers.gradleProperty("benchHcpp").orNull == "true"
+androidComponents {
+    onVariants { variant ->
+        if (benchHcpp) {
+            variant.sources.manifests.addStaticManifestFile(file("src/hcpp/AndroidManifest.xml").absolutePath)
+        }
+    }
+}
