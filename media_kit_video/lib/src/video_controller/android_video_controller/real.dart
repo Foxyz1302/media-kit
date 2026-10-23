@@ -11,8 +11,10 @@ import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/src/utils/query_decoders.dart';
+import 'package:media_kit_video/src/video_controller/native_video_controller/native_video_controller.dart';
 import 'package:media_kit_video/src/video_controller/platform_video_controller.dart';
 import 'package:synchronized/synchronized.dart';
 
@@ -47,6 +49,28 @@ class AndroidVideoController extends PlatformVideoController {
   /// to it.
   Completer<void>? _surfaceReady;
 
+  /// How long the views' sizes stay unchanged before the Surface follows them
+  /// ([VideoControllerConfiguration.renderAtWidgetSize]). Longer than on desktop: every Surface resize on
+  /// Android is a new Surface, on which mpv re-creates its video output.
+  static const settleDelay = Duration(milliseconds: 250);
+
+  /// The views showing this output, from [setViewSize].
+  final _views =
+      HashMap<Object, ({Size size, BoxFit fit, double? aspectRatio})>();
+
+  /// The last non-empty [_views], which size a new file while no view shows the output.
+  var _lastViews = <({Size size, BoxFit fit, double? aspectRatio})>[];
+
+  /// Fits the Surface to [_views] once their sizes have settled.
+  Timer? _settle;
+
+  /// Whether the Surface follows [_views] (per [VideoControllerConfiguration.renderAtWidgetSize], on by
+  /// default): only when mpv renders into it. A decoder writing into it directly (`mediacodec_embed`)
+  /// picks its own buffer size.
+  bool get _followsViews =>
+      (configuration.renderAtWidgetSize ?? true) &&
+      (configuration.vo == 'gpu' || configuration.vo == 'gpu-next');
+
   NativePlayer get platform => player.platform as NativePlayer;
 
   /// The Surface size for a [width] x [height] video: the video's own size, scaled down (aspect ratio
@@ -76,6 +100,108 @@ class AndroidVideoController extends PlatformVideoController {
     int even(double v) => math.max(2, (v / 2).round() * 2);
     return (width: even(width * scale), height: even(height * scale));
   }
+
+  /// The Surface size for a [width] x [height] video that [views] show: the size the largest of them shows
+  /// the picture at, in physical pixels ([NativeVideoController.outputSizeFor]), but never above [cap], the
+  /// video's own size within the display ([surfaceSizeFor]). [cap] without a view, or for a view that shows
+  /// the video at its own size ([BoxFit.none], [BoxFit.scaleDown]).
+  static ({int width, int height}) viewSurfaceSizeFor(
+    int width,
+    int height,
+    Iterable<({Size size, BoxFit fit, double? aspectRatio})> views,
+    ({int width, int height}) cap,
+  ) {
+    (int, int)? largest;
+    for (final view in views) {
+      final size = NativeVideoController.outputSizeFor(
+        width,
+        height,
+        view.size,
+        fit: view.fit,
+        aspectRatio: view.aspectRatio,
+      );
+      if (size == null) {
+        return cap;
+      }
+      if (largest == null || size.$1 * size.$2 > largest.$1 * largest.$2) {
+        largest = size;
+      }
+    }
+    if (largest == null || largest.$1 >= cap.width || largest.$2 >= cap.height) {
+      return cap;
+    }
+    return (width: largest.$1, height: largest.$2);
+  }
+
+  /// The Surface size for a [width] x [height] video: [surfaceSizeFor], or the size the views show it at.
+  ({int width, int height}) _surfaceSizeFor(int width, int height) {
+    final cap = surfaceSizeFor(width, height);
+    if (!_followsViews) {
+      return cap;
+    }
+    return viewSurfaceSizeFor(
+      width,
+      height,
+      _views.isEmpty ? _lastViews : _views.values,
+      cap,
+    );
+  }
+
+  @override
+  void setViewSize(
+    Object view,
+    Size? size, {
+    BoxFit fit = BoxFit.contain,
+    double? aspectRatio,
+  }) {
+    if (_disposed) {
+      return;
+    }
+    if (size == null || size.isEmpty || !size.isFinite) {
+      _views.remove(view);
+    } else {
+      _views[view] = (size: size, fit: fit, aspectRatio: aspectRatio);
+      _lastViews = _views.values.toList();
+    }
+    if (!_followsViews) {
+      return;
+    }
+    _settle?.cancel();
+    _settle = Timer(settleDelay, _followViews);
+  }
+
+  /// Resizes the Surface to the size [_views] show the video at, once they have settled. Only for a change
+  /// of more than a tenth of the longer side, & never while no view is left: each resize is a new Surface &
+  /// a new video output in mpv.
+  Future<void> _followViews() => lock.synchronized(() async {
+        if (_disposed || !_followsViews || _views.isEmpty) {
+          return;
+        }
+        if (_surfaceReady != null) {
+          // _onPreloaded is attaching a Surface; look again once it's done.
+          _settle?.cancel();
+          _settle = Timer(settleDelay, _followViews);
+          return;
+        }
+        final width = _videoWidth;
+        final height = _videoHeight;
+        final current = rect.value;
+        if (width == null || height == null || current == null || current.width <= 1) {
+          return;
+        }
+        final surface = _surfaceSizeFor(width, height);
+        final now = math.max(current.width, current.height);
+        final next = math.max(surface.width, surface.height);
+        if ((next - now).abs() <= now / 10) {
+          return;
+        }
+        final handle = await player.handle;
+        await _channel.invokeMethod('VideoOutputManager.SetSurfaceSize', {
+          'handle': handle.toString(),
+          'width': surface.width.toString(),
+          'height': surface.height.toString(),
+        });
+      });
 
   Future<void> setProperty(String key, String value) async {
     await platform.setProperty(key, value, waitForInitialization: false);
@@ -143,7 +269,7 @@ class AndroidVideoController extends PlatformVideoController {
     if (size == null || _disposed) {
       return;
     }
-    final surface = surfaceSizeFor(size.width, size.height);
+    final surface = _surfaceSizeFor(size.width, size.height);
     final current = rect.value;
     final sameSurface = current != null &&
         current.width.toInt() == surface.width &&
@@ -243,7 +369,7 @@ class AndroidVideoController extends PlatformVideoController {
           _videoWidth = width;
           _videoHeight = height;
 
-          final surface = surfaceSizeFor(width, height);
+          final surface = _surfaceSizeFor(width, height);
           final handle = await player.handle;
 
           await _channel.invokeMethod('VideoOutputManager.SetSurfaceSize', {
@@ -375,6 +501,9 @@ class AndroidVideoController extends PlatformVideoController {
   /// Disposes the instance. Releases allocated resources back to the system.
   Future<void> _dispose() async {
     _disposed = true;
+    _settle?.cancel();
+    _views.clear();
+    _lastViews = [];
     super.dispose();
     wid.dispose();
     wid.removeListener(widListener);
