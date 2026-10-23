@@ -52,6 +52,10 @@ static void video_output_dispose(GObject* object) {
   if (self->texture_gl) {
     fl_texture_registrar_unregister_texture(self->texture_registrar,
                                             FL_TEXTURE(self->texture_gl));
+    // The raster thread may be rendering into the texture with mpv's render
+    // context and the isolated EGL context current; once this returns, it
+    // never touches either again, so the context is current nowhere else
+    texture_gl_release(self->texture_gl);
     
     // Free mpv_render_context with our own isolated EGL context current,
     // whatever this thread had current (GDK's GL context on the platform
@@ -80,7 +84,15 @@ static void video_output_dispose(GObject* object) {
       self->egl_context = EGL_NO_CONTEXT;
     }
     
-    g_object_unref(self->texture_gl);
+    // A populate that looked the texture up before it was unregistered may
+    // not have started yet; the texture outlives it (texture_gl_release)
+    g_timeout_add_seconds(
+        1,
+        [](gpointer data) -> gboolean {
+          g_object_unref(data);
+          return G_SOURCE_REMOVE;
+        },
+        self->texture_gl);
   }
   // S/W
   if (self->texture_sw) {
@@ -267,9 +279,10 @@ VideoOutput* video_output_new(FlTextureRegistrar* texture_registrar,
                 // (llvmpipe is Mesa's software renderer)
                 g_print(
                     "media_kit: VideoOutput: H/W rendering with isolated EGL "
-                    "context (%s, %s).\n",
+                    "context (%s, %s, %s).\n",
                     isolated_egl_windowing_system(),
-                    renderer != NULL ? renderer : "unknown renderer");
+                    renderer != NULL ? renderer : "unknown renderer",
+                    texture_gl_get_sync_name(self->texture_gl));
               } else {
                 g_printerr("media_kit: VideoOutput: Failed to create mpv_render_context.\n");
                 software_reason = "mpv refused the OpenGL render context";
@@ -420,21 +433,23 @@ guint8* video_output_get_pixel_buffer(VideoOutput* self) {
   return self->pixel_buffer;
 }
 
-gint64 video_output_get_width(VideoOutput* self) {
-  // Fixed width.
-  if (self->width) {
-    return self->width;
+// The display size of the video from mpv's video-out-params, rotation
+// applied; 0 x 0 while there is none (before the first frame, after the end).
+// A failed read hands over nothing and leaves |params| as it was; a
+// successful one hands over the node whatever its format.
+static void video_output_get_video_size(VideoOutput* self,
+                                        gint64* width,
+                                        gint64* height) {
+  *width = 0;
+  *height = 0;
+  mpv_node params;
+  if (mpv_get_property(self->handle, "video-out-params", MPV_FORMAT_NODE,
+                       &params) < 0) {
+    return;
   }
 
-  // Video resolution dependent width.
-  gint64 width = 0;
-  gint64 height = 0;
-
-  mpv_node params;
-  mpv_get_property(self->handle, "video-out-params", MPV_FORMAT_NODE, &params);
-
   int64_t dw = 0, dh = 0, rotate = 0;
-  if (params.format == MPV_FORMAT_NODE_MAP) {
+  if (params.format == MPV_FORMAT_NODE_MAP && params.u.list != NULL) {
     for (int32_t i = 0; i < params.u.list->num; i++) {
       char* key = params.u.list->keys[i];
       auto value = params.u.list->values[i];
@@ -450,11 +465,23 @@ gint64 video_output_get_width(VideoOutput* self) {
         }
       }
     }
-    mpv_free_node_contents(&params);
+  }
+  mpv_free_node_contents(&params);
+
+  *width = rotate == 0 || rotate == 180 ? dw : dh;
+  *height = rotate == 0 || rotate == 180 ? dh : dw;
+}
+
+gint64 video_output_get_width(VideoOutput* self) {
+  // Fixed width.
+  if (self->width) {
+    return self->width;
   }
 
-  width = rotate == 0 || rotate == 180 ? dw : dh;
-  height = rotate == 0 || rotate == 180 ? dh : dw;
+  // Video resolution dependent width.
+  gint64 width = 0;
+  gint64 height = 0;
+  video_output_get_video_size(self, &width, &height);
 
   if (self->texture_sw != NULL) {
     // Make sure |width| & |height| fit between |SW_RENDERING_MAX_WIDTH| &
@@ -479,32 +506,7 @@ gint64 video_output_get_height(VideoOutput* self) {
   // Video resolution dependent height.
   gint64 width = 0;
   gint64 height = 0;
-
-  mpv_node params;
-  mpv_get_property(self->handle, "video-out-params", MPV_FORMAT_NODE, &params);
-
-  int64_t dw = 0, dh = 0, rotate = 0;
-  if (params.format == MPV_FORMAT_NODE_MAP) {
-    for (int32_t i = 0; i < params.u.list->num; i++) {
-      char* key = params.u.list->keys[i];
-      auto value = params.u.list->values[i];
-      if (value.format == MPV_FORMAT_INT64) {
-        if (strcmp(key, "dw") == 0) {
-          dw = value.u.int64;
-        }
-        if (strcmp(key, "dh") == 0) {
-          dh = value.u.int64;
-        }
-        if (strcmp(key, "rotate") == 0) {
-          rotate = value.u.int64;
-        }
-      }
-    }
-    mpv_free_node_contents(&params);
-  }
-
-  width = rotate == 0 || rotate == 180 ? dw : dh;
-  height = rotate == 0 || rotate == 180 ? dh : dw;
+  video_output_get_video_size(self, &width, &height);
 
   if (self->texture_sw != NULL) {
     // Make sure |width| & |height| fit between |SW_RENDERING_MAX_WIDTH| &

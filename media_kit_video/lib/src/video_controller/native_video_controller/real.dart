@@ -98,6 +98,11 @@ class NativeVideoController extends PlatformVideoController {
         videoParamsWidth = width;
         videoParamsHeight = height;
 
+        // A size set through the configuration or [setSize] stays across files.
+        if (this.width != null && this.height != null) {
+          return;
+        }
+
         await _channel.invokeMethod('VideoOutputManager.SetSize', {
           'handle': handle.toString(),
           'width': width.toString(),
