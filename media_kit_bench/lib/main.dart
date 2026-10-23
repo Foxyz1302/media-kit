@@ -59,7 +59,7 @@ const _liveHlsUrl = String.fromEnvironment('BENCH_LIVE_HLS', defaultValue: '$_ho
 // (https://devstreaming-cdn.apple.com/videos/streaming/examples/bipbop_16x9/bipbop_16x9_variant.m3u8)
 // works too, if the phone's own connection loads its variants fast enough.
 const _vodHlsUrl = String.fromEnvironment('BENCH_VOD_HLS', defaultValue: '$_host/clips/vod.m3u8');
-const _version = 3;
+const _version = 4;
 
 List<String> _csv(String s) => [for (final e in s.split(',')) if (e.trim().isNotEmpty) e.trim()];
 
@@ -129,6 +129,8 @@ Map<String, dynamic> _windowStats(int fromUs, int toUs, {double? playedSeconds})
   final build = w.map((f) => f.buildMs).toList()..sort();
   final raster = w.map((f) => f.rasterMs).toList()..sort();
   return {
+    'fromUs': fromUs,
+    'toUs': toUs,
     'seconds': _r2(seconds),
     if (playedSeconds != null) 'playbackRate': _r2(playedSeconds / seconds),
     'flutterFrames': w.length,
@@ -179,6 +181,18 @@ class _AnimatedPhase {
 }
 
 final _http = HttpClient();
+
+/// Whether the engine runs Hybrid Composition++: the EnableHcpp flag, API 34+, Impeller Vulkan and the
+/// SurfaceControl swapchain. With it, every platform view create is routed to HCPP.
+Future<Object> _hcppActive() async {
+  if (!Platform.isAndroid) return false;
+  try {
+    return await HybridAndroidViewController.checkIfSupported();
+  } catch (e, st) {
+    debugPrint('HCPP check failed: $e\n$st');
+    return 'error: $e';
+  }
+}
 
 Future<void> _post(Map<String, dynamic> body) async {
   try {
@@ -259,6 +273,8 @@ class _BenchPageState extends State<BenchPage> with TickerProviderStateMixin {
     await Future<void>.delayed(_hostAttachDelay);
     final view = WidgetsBinding.instance.platformDispatcher.views.first;
     final lastVsync = _frames.isEmpty ? null : _frames.last.vsyncUs;
+    final hcpp = await _hcppActive();
+    debugPrint('bench: HybridAndroidViewController.checkIfSupported() = $hcpp');
     await _post({
       'type': 'hello',
       'version': _version,
@@ -269,6 +285,7 @@ class _BenchPageState extends State<BenchPage> with TickerProviderStateMixin {
       'mpvLog': _mpvLogLevel.name,
       'animated': [for (final c in _animated) c.name],
       'linkTest': _linkTestClip,
+      'hcppActive': hcpp,
       'refreshRate': view.display.refreshRate,
       'physicalSize': _viewSize(),
       'clockSkewUs': lastVsync == null ? null : developer.Timeline.now - lastVsync,
