@@ -11,7 +11,8 @@ import json
 import re
 
 NATIVE = ('native', 'nativeTexture')
-CODEC = re.compile(r'(c2\.(?:qti|android|exynos|mtk)\.[a-z0-9.]+?\.decoder|OMX\.[A-Za-z0-9.]+?\.decoder)')
+CLIP_SECONDS = 20  # tool/encode_clips*.sh
+CODEC = re.compile(r'(c2\.(?:qti|android|exynos|mtk)\.[a-z0-9.-]+?\.decoder|OMX\.[A-Za-z0-9.]+?\.decoder)')
 
 
 def load(path):
@@ -31,6 +32,28 @@ def codec_lines(path):
         for name in CODEC.findall(line):
             out.append((t, name))
     return out
+
+
+def until_eof(samples):
+    """Animated-window motion before the clip ends: the window can run into the end of the 20 s clip,
+    where mpv holds the last position and the native plugin reports 0."""
+    s = []
+    for e in samples:
+        if e[1] >= CLIP_SECONDS - 0.1 or (s and s[-1][1] > CLIP_SECONDS - 1 and e[1] < 0.5):
+            break
+        s.append(e)
+    if len(s) < 2:
+        s = samples
+    back = sum(1 for p, q in zip(s, s[1:]) if q[1] - p[1] < -0.05)
+    stall, last = 0, s[0][0]
+    for p, q in zip(s, s[1:]):
+        if q[1] - p[1] > 0.001:
+            last = q[0]
+        else:
+            stall = max(stall, q[0] - last)
+    span = (s[-1][0] - s[0][0]) / 1000
+    rate = round((s[-1][1] - s[0][1]) / span, 2) if span > 0 else None
+    return rate, back, int(stall), round(span, 1)
 
 
 def surface_events(lines, a, b):
@@ -116,16 +139,18 @@ def main():
     anim = [r for r in runs if r.get('animated')]
     if anim:
         print('### Animated window: video moving between full screen and a 30% mini-player, 1 transition/s\n')
+        print('Rate, backward jumps and stalls count only the part of the window before the clip ends (s measured).\n')
         print('| clip | config | Flutter fps | raster p90/p99 (ms) | frames >8.3 / >16.7 ms | mpv drops | rate | backward jumps '
-              '| longest stall ms | surface changes |\n|' + '---|' * 10)
+              '| longest stall ms | s measured | surface changes |\n|' + '---|' * 11)
         for r in anim:
             a = r['animated']
             drops = None if r['config'] in NATIVE else delta(r, 'frame-drop-count', 'overlayEnd', 'animatedEnd')
-            stall = f"{a.get('maxStallMs')}" + (' (500 ms position steps)' if r['config'] in NATIVE else '')
+            rate, back, stall, span = until_eof(a['samples'])
+            stall = f"{stall}" + (' (500 ms position steps)' if r['config'] in NATIVE else '')
             surf = surface_events(lines, a['startEpochMs'], a['endEpochMs']) if lines else '–'
             print(f"| {short_clip(r['clip'])} | {r['config']} | {a.get('flutterFps')} | {fmt(a.get('rasterP90Ms'), a.get('rasterP99Ms'))} "
-                  f"| {a.get('over8ms')}/{a.get('over16ms')} | {'–' if drops is None else drops} | {a.get('playbackRate')} "
-                  f"| {a.get('backJumps')} | {stall} | {'–' if r['config'] in NATIVE else surf} |")
+                  f"| {a.get('over8ms')}/{a.get('over16ms')} | {'–' if drops is None else drops} | {rate} "
+                  f"| {back} | {stall} | {span} | {'–' if r['config'] in NATIVE else surf} |")
         print()
     totals = {k: sum(warn_counts(r)[k] for r in runs if r['config'] not in NATIVE) for k in ('invalidTs', 'fileCache', 'osc')}
     mk = sum(1 for r in runs if r['config'] not in NATIVE)

@@ -1,0 +1,35 @@
+         1792706609.047 22281 22281 D ViewRootImplStubImpl: onSurfaceViewAttached:
+         1792706618.103 22281 22281 I VideoOutputManager: com.alexmercerind.media_kit_video.VideoOutputManager.create: -5476376614172447280
+         1792706618.109 22281 22281 I flutter : MKDBG videoParams epoch=1792706618109 w=0 h=0 rect=null isZero=true isSame=false mpvPos=
+         1792706618.375 22281 22281 I flutter : MKDBG videoParams epoch=1792706618375 w=0 h=0 rect=null isZero=true isSame=false mpvPos=0.000000
+         1792706618.539 22281 22281 I flutter : MKDBG videoParams epoch=1792706618532 w=2560 h=1440 rect=null isZero=false isSame=false mpvPos=0.000000
+         1792706618.541 22281 22281 I VideoOutputManager: com.alexmercerind.media_kit_video.VideoOutputManager.setSurfaceSize: -5476376614172447280 2560 1440
+         1792706618.541 22281 22281 I VideoOutput: onSurfaceAvailable
+         1792706618.543 22281 22281 I VideoOutput: newGlobalRef: object = Surface(name=null mNativeObject=-5476376615246332224)/@0x960d1f0
+         1792706618.545 22281 22281 I flutter : VideoOutput.Resize
+         1792706618.553 22281 22281 I flutter : MKDBG widListener epoch=1792706618546 wid=14886 size=2560x1440 dartPosMs=0 mpvPos=0.016667 vo=null
+         1792706618.715 22281 22281 I flutter : MKDBG seekTo epoch=1792706618715 targetMs=83 mpvPosBefore=0.083333
+         1792706618.737 22281 22281 I flutter : MKDBG seekDone epoch=1792706618716 mpvPosAfter=0.083000
+         1792706618.859 22281 22281 I flutter : MKDBG videoParams epoch=1792706618737 w=0 h=0 rect=Instance of 'Rect' isZero=true isSame=false mpvPos=0.083000
+         1792706618.862 22281 22281 I flutter : MKDBG videoParams epoch=1792706618860 w=2560 h=1440 rect=Instance of 'Rect' isZero=false isSame=true mpvPos=0.083000
+         1792706633.212 22281 22281 I VideoOutputManager: com.alexmercerind.media_kit_video.VideoOutputManager.dispose: -5476376614172447280
+         1792706633.213 22281 22281 I VideoOutput: onSurfaceCleanup
+         1792706633.214 22281 22281 I flutter : VideoOutput.Resize
+         1792706635.312 22281 22281 I VideoOutputManager: com.alexmercerind.media_kit_video.VideoOutputManager.create: -5476376614172166672
+         1792706635.323 22281 22281 I flutter : MKDBG videoParams epoch=1792706635323 w=0 h=0 rect=null isZero=true isSame=false mpvPos=
+         1792706635.491 22281 22281 I flutter : MKDBG videoParams epoch=1792706635491 w=0 h=0 rect=null isZero=true isSame=false mpvPos=0.000000
+         1792706635.619 22281 22281 I flutter : MKDBG videoParams epoch=1792706635614 w=2560 h=1440 rect=null isZero=false isSame=false mpvPos=0.000000
+         1792706635.620 22281 22281 I VideoOutputManager: com.alexmercerind.media_kit_video.VideoOutputManager.setSurfaceSize: -5476376614172166672 2560 1440
+         1792706635.620 22281 22281 I VideoOutput: onSurfaceAvailable
+         1792706635.622 22281 22281 I VideoOutput: newGlobalRef: object = Surface(name=null mNativeObject=-5476376615246416272)/@0x254bef6
+         1792706635.623 22281 22281 I flutter : VideoOutput.Resize
+         1792706635.632 22281 22281 I flutter : MKDBG widListener epoch=1792706635624 wid=14926 size=2560x1440 dartPosMs=0 mpvPos=0.016667 vo=null
+         1792706635.807 22281 22281 I flutter : MKDBG seekTo epoch=1792706635806 targetMs=66 mpvPosBefore=0.066667
+         1792706635.823 22281 22281 I flutter : MKDBG seekDone epoch=1792706635807 mpvPosAfter=0.066000
+         1792706635.910 22281 22281 I flutter : MKDBG videoParams epoch=1792706635823 w=0 h=0 rect=Instance of 'Rect' isZero=true isSame=false mpvPos=0.066000
+         1792706635.927 22281 22281 I flutter : MKDBG videoParams epoch=1792706635916 w=2560 h=1440 rect=Instance of 'Rect' isZero=false isSame=true mpvPos=0.066000
+         1792706638.215 22281 22281 I VideoOutput: deleteGlobalObjectRef: ref = 14886
+         1792706650.301 22281 22281 I VideoOutputManager: com.alexmercerind.media_kit_video.VideoOutputManager.dispose: -5476376614172166672
+         1792706650.302 22281 22281 I VideoOutput: onSurfaceCleanup
+         1792706650.303 22281 22281 I flutter : VideoOutput.Resize
+         1792706655.305 22281 22281 I VideoOutput: deleteGlobalObjectRef: ref = 14926
