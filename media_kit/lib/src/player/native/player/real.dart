@@ -2408,7 +2408,8 @@ class NativePlayer extends PlatformPlayer {
         // Keep that memory-only behaviour explicitly instead of writing every stream to flash storage.
         'cache-on-disk': Platform.isAndroid ? 'no' : 'yes',
         'hr-seek': 'yes',
-        'hr-seek-framedrop': 'no',
+        // mpv's default: frames before a precise seek's target may be dropped instead of fully decoded.
+        'hr-seek-framedrop': 'yes',
         'correct-downscaling': 'no',
         'linear-downscaling': 'no',
         'sigmoid-upscaling': 'no',
