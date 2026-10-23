@@ -36,6 +36,7 @@ struct _VideoOutput {
   FlTextureRegistrar* texture_registrar;
   gboolean destroyed;
   gboolean gpu_rendering; /* H/W rendering on a GPU, not a software rasterizer. */
+  gint has_frame; /* Set once the texture was sized for a frame of mpv's. */
 };
 
 G_DEFINE_TYPE(VideoOutput, video_output, G_TYPE_OBJECT)
@@ -132,6 +133,7 @@ static void video_output_init(VideoOutput* self) {
   self->texture_registrar = NULL;
   self->destroyed = FALSE;
   self->gpu_rendering = FALSE;
+  self->has_frame = 0;
   g_mutex_init(&self->mutex);
 }
 
@@ -415,8 +417,15 @@ void video_output_set_size(VideoOutput* self, gint64 width, gint64 height) {
 
   // H/W
   if (self->texture_gl) {
+    gboolean changed = self->width != width || self->height != height;
     self->width = width;
     self->height = height;
+    // A paused output gets no frame from mpv that would resize the texture:
+    // the frame it shows is drawn again at the new size
+    if (changed && g_atomic_int_get(&self->has_frame)) {
+      fl_texture_registrar_mark_texture_frame_available(
+          self->texture_registrar, FL_TEXTURE(self->texture_gl));
+    }
   }
   // S/W
   if (self->texture_sw) {
@@ -552,6 +561,7 @@ gboolean video_output_get_gpu_rendering(VideoOutput* self) {
 }
 
 void video_output_notify_texture_update(VideoOutput* self) {
+  g_atomic_int_set(&self->has_frame, 1);
   gint64 id = video_output_get_texture_id(self);
   gint64 width = video_output_get_width(self);
   gint64 height = video_output_get_height(self);
