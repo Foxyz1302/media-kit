@@ -99,6 +99,7 @@ static void media_kit_video_plugin_handle_method_call(
             IdleCallbackData* idle_data = (IdleCallbackData*)user_data;
             fl_method_channel_invoke_method(idle_data->channel, "VideoOutput.Resize", 
                                           idle_data->result, NULL, NULL, NULL);
+            fl_value_unref(idle_data->result);
             g_free(idle_data);
             return G_SOURCE_REMOVE;
           }, idle_data);
