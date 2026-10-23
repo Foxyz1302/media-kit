@@ -62,9 +62,9 @@ void main() {
           'threads left after ${2 * cycles} cycles: ${last['grownThreads']}',
     );
     expect(
-      last['rssKiB'] - settled['rssKiB'],
+      last['rssKiB'] - baseline['rssKiB'],
       lessThanOrEqualTo(16 * 1024),
-      reason: 'RSS grew between cycle $cycles and cycle ${2 * cycles}',
+      reason: 'RSS grew over ${2 * cycles} cycles, measured after malloc_trim',
     );
   }, timeout: const Timeout(Duration(minutes: 6)));
   test('leak-playback-file-descriptors', () async {

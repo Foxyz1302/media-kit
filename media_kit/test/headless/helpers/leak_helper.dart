@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:ffi';
 import 'dart:io';
 import 'dart:isolate';
 
@@ -30,6 +31,9 @@ Future<void> main(List<String> arguments) async {
 }
 
 const Duration _deferredDestroy = Duration(seconds: 6);
+
+final int Function(int) _mallocTrim = DynamicLibrary.process()
+    .lookupFunction<Int Function(Size), int Function(int)>('malloc_trim');
 
 Future<void> _run(List<Object> arguments) async {
   final port = arguments[0] as SendPort;
@@ -83,6 +87,7 @@ Future<void> _settle() async {
       stable = Stopwatch()..start();
     }
   }
+  _mallocTrim(0);
 }
 
 Map<String, Object?> _sample(String phase,
