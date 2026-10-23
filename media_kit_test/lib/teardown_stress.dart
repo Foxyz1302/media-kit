@@ -10,7 +10,7 @@
 ///
 /// Environment:
 ///   STRESS_CLIPS            comma separated files, required
-///   STRESS_MODE             teardown (default) or bench
+///   STRESS_MODE             teardown (default), bench or shot
 ///   STRESS_LANES            players alive at once (4)
 ///   STRESS_ITERATIONS       create/dispose iterations per lane (25)
 ///   STRESS_MAX_LIFETIME_MS  longest life of a player (2000)
@@ -18,7 +18,9 @@
 ///   STRESS_SHADERS          glsl-shaders value, e.g. an Anime4K chain
 ///   STRESS_SEED             random seed
 ///   STRESS_BENCH_SECONDS    bench: measured seconds (20)
-///   STRESS_SIZE             bench: fixed output size, WIDTHxHEIGHT
+///   STRESS_SIZE             bench, shot: fixed output size, WIDTHxHEIGHT
+///   STRESS_SHOT             shot: PNG of mpv's output at 0.5 s of the first
+///                           clip, as rendered into the texture
 ///   STRESS_MPV_LOG          mpv messages logged from this level (error)
 ///   STRESS_HWDEC            hwdec of the video controllers (auto)
 ///   STRESS_SIZES            setSize choices: video or WIDTHxHEIGHT, comma
@@ -164,6 +166,8 @@ class _StressScreenState extends State<StressScreen>
       await _probe();
       if (_mode == 'bench') {
         await _bench();
+      } else if (_mode == 'shot') {
+        await _shot();
       } else {
         await _teardown();
       }
@@ -404,6 +408,33 @@ class _StressScreenState extends State<StressScreen>
       await player.dispose();
     }
     _ended = players.length;
+  }
+
+  Future<void> _shot() async {
+    final player = _player();
+    final controller = _controller(player);
+    _update(() => _lane[0].controller = controller);
+    final native = player.platform as NativePlayer;
+    await native.setProperty('dither-depth', 'no');
+    await player.open(Media(_clips.first), play: false);
+    await player.seek(const Duration(milliseconds: 500));
+    final shaders = _shaders;
+    if (shaders != null) {
+      await native.setProperty('glsl-shaders', shaders);
+    }
+    final size = _benchSize?.split('x').map(int.parse).toList();
+    if (size != null && size.length == 2) {
+      await controller.setSize(width: size[0], height: size[1]);
+    }
+    await Future.delayed(const Duration(seconds: 3));
+    final path = _environment['STRESS_SHOT'] ?? 'shot.png';
+    await native.command(['screenshot-to-file', path, 'window']);
+    await Future.delayed(const Duration(seconds: 1));
+    _log('shot $path');
+    _update(() => _lane[0].controller = null);
+    await Future.delayed(const Duration(milliseconds: 300));
+    await player.dispose();
+    _ended = 1;
   }
 
   @override
