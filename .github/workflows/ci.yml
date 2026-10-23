@@ -49,7 +49,30 @@ jobs:
           channel: "stable"
           cache: true
       - run: dart pub get
-      - run: dart test
+      - run: dart test --exclude-tags headless
+
+  media_kit-headless-linux:
+    name: package:media_kit headless suite (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: media_kit
+    steps:
+      - uses: actions/checkout@v7
+      - run: sudo apt-get update
+      - run: sudo apt-get install -y libmpv-dev ffmpeg
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: "stable"
+          cache: true
+      - run: dart pub get
+      - run: dart test test/headless --concurrency=1 --reporter=expanded
+      - name: Known-failing tests (not gating)
+        continue-on-error: true
+        run: >
+          dart test test/headless --tags known-failing --run-skipped
+          --concurrency=1 --reporter=expanded
 
   media_kit-tests-macos:
     name: package:media_kit tests (macOS)
