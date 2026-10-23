@@ -40,7 +40,8 @@ const _allClips = [
 // native: better_native_video_player's default hybrid-composition platform view.
 // nativeTexture: the user's app settings (texture mode, feed buffering, lightweight inline views),
 // applied through the plugin's global config, so it never shares an app launch with `native`.
-enum BenchConfig { mkDefault, mkCopy, mkGpuMediacodec, mkEmbed, native, nativeTexture }
+// mkAutosync: mpv's --autosync=30 (smoothed A/V correction); mkNoAudio: aid=no (system-clock timing).
+enum BenchConfig { mkDefault, mkCopy, mkGpuMediacodec, mkEmbed, mkAutosync, mkNoAudio, native, nativeTexture }
 
 const _clipsDefine = String.fromEnvironment('BENCH_CLIPS');
 const _configsDefine = String.fromEnvironment('BENCH_CONFIGS');
@@ -56,6 +57,8 @@ const _animateDefine = String.fromEnvironment('BENCH_ANIMATE');
 const _animatedWindow = Duration(seconds: 6);
 // BENCH_CHECKS=true: run the functional regression checks instead of the performance matrix.
 const _checks = bool.fromEnvironment('BENCH_CHECKS');
+// BENCH_CHECK_SET=start: the start/seek latency checks instead of the regression checks.
+const _checkSet = String.fromEnvironment('BENCH_CHECK_SET');
 const _liveHlsUrl = String.fromEnvironment('BENCH_LIVE_HLS', defaultValue: '$_host/clips/live.m3u8');
 // Local HLS VOD from tool/encode_check_clips.sh by default. Apple's public bipbop master
 // (https://devstreaming-cdn.apple.com/videos/streaming/examples/bipbop_16x9/bipbop_16x9_variant.m3u8)
@@ -242,6 +245,8 @@ class _BenchPageState extends State<BenchPage> with TickerProviderStateMixin {
   bool _overlay = false;
   // BENCH_VIEWS=small: the run stays in the mini-player rect and skips the animated window.
   bool _small = false;
+  // Set while a mountLater check runs: mounts its Video.
+  void Function()? _mountLater;
   // 0 = full screen, 1 = corner mini-player; driven only during an animated window.
   late final AnimationController _mini = AnimationController(vsync: this, duration: const Duration(seconds: 1));
   String _status = 'waiting for host';
@@ -370,20 +375,34 @@ class _BenchPageState extends State<BenchPage> with TickerProviderStateMixin {
   /// Runs [body] with a fresh Player rendered through a default VideoController.
   Future<Map<String, dynamic>> _check(
     String name,
-    Future<Map<String, dynamic>> Function(Player player, NativePlayer np, VideoController controller) body,
-  ) async {
-    final player = Player(configuration: const PlayerConfiguration(logLevel: MPVLogLevel.warn));
+    Future<Map<String, dynamic>> Function(Player player, NativePlayer np, VideoController controller) body, {
+    Map<String, String> properties = const {},
+    MPVLogLevel logLevel = MPVLogLevel.warn,
+    int maxLogs = 40,
+    bool mountLater = false,
+  }) async {
+    final player = Player(configuration: PlayerConfiguration(logLevel: logLevel));
     final np = player.platform as NativePlayer;
     final logs = <String>[];
+    final sw = Stopwatch()..start();
     final sub = player.stream.log.listen((l) {
-      if (logs.length < 40) logs.add('[${l.level}] ${l.prefix}: ${l.text}'.trim());
+      if (logs.length < maxLogs) logs.add('${sw.elapsedMilliseconds} [${l.level}] ${l.prefix}: ${l.text}'.trim());
     });
+    for (final e in properties.entries) {
+      await np.setProperty(e.key, e.value);
+    }
     final controller = VideoController(player);
-    setState(() {
-      _status = 'check · $name';
-      _video = Video(controller: controller, controls: NoVideoControls, fit: BoxFit.contain);
-    });
-    await WidgetsBinding.instance.endOfFrame;
+    void mount() => setState(() {
+          _status = 'check · $name';
+          _video = Video(controller: controller, controls: NoVideoControls, fit: BoxFit.contain);
+        });
+    // mountLater: the body runs with nothing drawing (no setState, no animation) & mounts the Video itself.
+    _mountLater = mountLater ? mount : null;
+    if (!mountLater) {
+      mount();
+      await WidgetsBinding.instance.endOfFrame;
+    }
+    sw.reset();
     Map<String, dynamic> result;
     try {
       result = await body(player, np, controller);
@@ -391,6 +410,8 @@ class _BenchPageState extends State<BenchPage> with TickerProviderStateMixin {
       result = {'pass': false, 'error': '$e', 'stack': st.toString().split('\n').take(6).join(' | ')};
     }
     result['info'] = await _props(np, ['hwdec-current', 'video-params/w', 'video-params/h', 'estimated-vf-fps']);
+    result['properties'] = properties;
+    _mountLater = null;
     setState(() => _video = null);
     await WidgetsBinding.instance.endOfFrame;
     await sub.cancel();
@@ -480,12 +501,179 @@ class _BenchPageState extends State<BenchPage> with TickerProviderStateMixin {
         return {'pass': completed && s2.last[1] > 1.0, 'completed': completed, 'samplesNext': s2};
       },
     };
+    if (_checkSet == 'start') {
+      await _runStartChecks();
+      return;
+    }
+    if (_checkSet == 'start2') {
+      await _runStartChecks2();
+      return;
+    }
     for (final entry in checks.entries) {
       final r = await _check(entry.key, entry.value);
       r['type'] = 'check';
       r['version'] = _version;
       r['name'] = entry.key;
       await _post(r);
+    }
+  }
+
+  /// [ms, time-pos, avsync] every 200 ms for [d].
+  Future<List<List<num>>> _sampleSync(NativePlayer np, Duration d) async {
+    final out = <List<num>>[];
+    final sw = Stopwatch()..start();
+    while (sw.elapsed < d) {
+      out.add([
+        sw.elapsedMilliseconds,
+        await _timePos(np),
+        double.tryParse(await _prop(np, 'avsync')) ?? 99,
+      ]);
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+    }
+    return out;
+  }
+
+  /// The start & seek latency checks after the changes (BENCH_CHECK_SET=start2): start traces, play()
+  /// on a preloaded (paused, first frame shown) player, & AV1 seeks on the default hr-seek-framedrop.
+  Future<void> _runStartChecks2() async {
+    Future<void> post(String name, Map<String, dynamic> r) async {
+      r['type'] = 'check';
+      r['version'] = _version;
+      r['name'] = name;
+      await _post(r);
+    }
+
+    for (final clip in ['h264_1440p60.mp4', 'h264_2160p60.mp4']) {
+      await post(
+        'startTrace.$clip',
+        await _check('startTrace $clip', (p, np, c) async {
+          final sw = Stopwatch()..start();
+          await p.open(Media('$_host/clips/$clip'));
+          await c.waitUntilFirstFrameRendered.timeout(const Duration(seconds: 15));
+          final ttff = sw.elapsedMilliseconds;
+          await _waitFor(() async => await _timePos(np) > 0.0, const Duration(seconds: 10));
+          final moving = sw.elapsedMilliseconds;
+          await Future<void>.delayed(const Duration(milliseconds: 500));
+          return {'ttffMs': ttff, 'timePosAbove0Ms': moving};
+        }, logLevel: MPVLogLevel.v, maxLogs: 400),
+      );
+      await post(
+        'preloadedPlay.$clip',
+        await _check('preloadedPlay $clip', (p, np, c) async {
+          await p.open(Media('$_host/clips/$clip'), play: false);
+          await c.waitUntilFirstFrameRendered.timeout(const Duration(seconds: 15));
+          await Future<void>.delayed(const Duration(milliseconds: 1500));
+          final sw = Stopwatch()..start();
+          await p.play();
+          final moved = await _waitFor(() async => await _timePos(np) > 0.05, const Duration(seconds: 10));
+          return {'playToMotionMs': moved ? sw.elapsedMilliseconds : -1};
+        }),
+      );
+    }
+    for (final clip in ['av1_2160p30.mp4', 'h264_2160p60.mp4']) {
+      await post(
+        'seek.$clip.default',
+        await _check('seek $clip', (p, np, c) async {
+          await p.open(Media('$_host/clips/$clip'));
+          await _waitFor(() async => await _timePos(np) > 1.0, const Duration(seconds: 15));
+          final times = <int>[];
+          for (final target in [12.0, 4.0, 15.0]) {
+            final sw = Stopwatch()..start();
+            await p.seek(Duration(milliseconds: (target * 1000).round()));
+            final ok = await _waitFor(() async => await _timePos(np) >= target + 0.1, const Duration(seconds: 10));
+            times.add(ok ? sw.elapsedMilliseconds : -1);
+            await Future<void>.delayed(const Duration(milliseconds: 600));
+          }
+          return {'seekMs': times, 'framedrop': await _prop(np, 'hr-seek-framedrop')};
+        }),
+      );
+    }
+  }
+
+  /// Start latency, #1417 & seek latency checks (BENCH_CHECK_SET=start).
+  Future<void> _runStartChecks() async {
+    Future<void> post(String name, Map<String, dynamic> r) async {
+      r['type'] = 'check';
+      r['version'] = _version;
+      r['name'] = name;
+      await _post(r);
+    }
+
+    // #1417: MP4 whose first keyframe is 8 s in, audio from 0. time-pos & avsync over 14 s.
+    for (final sync in ['yes', 'no']) {
+      await post(
+        'lateKeyframe.initialAudioSync=$sync',
+        await _check('lateKeyframe sync=$sync', (p, np, c) async {
+          await p.open(Media('$_host/clips/late_keyframe.mp4'));
+          return {'samples': await _sampleSync(np, const Duration(seconds: 14))};
+        }, properties: {'initial-audio-sync': sync}),
+      );
+    }
+    // A normal file with initial-audio-sync=no: start, then a seek, A/V sync after each.
+    for (final sync in ['yes', 'no']) {
+      await post(
+        'seekSync.initialAudioSync=$sync',
+        await _check('seekSync sync=$sync', (p, np, c) async {
+          await p.open(Media('$_host/clips/long_720p30_6min.mp4'));
+          final start = await _sampleSync(np, const Duration(seconds: 4));
+          await p.seek(const Duration(seconds: 100));
+          final afterSeek = await _sampleSync(np, const Duration(seconds: 4));
+          return {'samples': start, 'afterSeek': afterSeek};
+        }, properties: {'initial-audio-sync': sync}),
+      );
+    }
+    // The VideoController made & open() called while nothing draws; the Video is mounted after open().
+    await post(
+      'controllerBetweenFrames',
+      await _check('controllerBetweenFrames', (p, np, c) async {
+        final sw = Stopwatch()..start();
+        await p.open(Media('$_host/clips/h264_1440p60.mp4')).timeout(const Duration(seconds: 15));
+        final openMs = sw.elapsedMilliseconds;
+        _mountLater?.call();
+        await c.waitUntilFirstFrameRendered.timeout(const Duration(seconds: 15));
+        return {'openMs': openMs, 'ttffMs': sw.elapsedMilliseconds};
+      }, mountLater: true),
+    );
+    // Seek latency with hr-seek-framedrop no (the old default) & yes: seek 10 s ahead, time until
+    // time-pos is past the target & advancing.
+    for (final clip in ['av1_2160p30.mp4', 'h264_2160p60.mp4']) {
+      for (final drop in ['no', 'yes']) {
+        await post(
+          'seek.$clip.framedrop=$drop',
+          await _check('seek $clip drop=$drop', (p, np, c) async {
+            await p.open(Media('$_host/clips/$clip'));
+            await _waitFor(() async => await _timePos(np) > 1.0, const Duration(seconds: 15));
+            final times = <int>[];
+            for (final target in [12.0, 4.0, 15.0]) {
+              final sw = Stopwatch()..start();
+              await p.seek(Duration(milliseconds: (target * 1000).round()));
+              final ok = await _waitFor(
+                () async => await _timePos(np) >= target + 0.1,
+                const Duration(seconds: 10),
+              );
+              times.add(ok ? sw.elapsedMilliseconds : -1);
+              await Future<void>.delayed(const Duration(milliseconds: 600));
+            }
+            return {'seekMs': times};
+          }, properties: {'hr-seek-framedrop': drop}),
+        );
+      }
+    }
+    // Start-up timeline: mpv's verbose log with ms offsets from open(), until playback restarts.
+    for (final clip in ['h264_1440p60.mp4', 'h264_2160p60.mp4']) {
+      await post(
+        'startTrace.$clip',
+        await _check('startTrace $clip', (p, np, c) async {
+          final sw = Stopwatch()..start();
+          await p.open(Media('$_host/clips/$clip'));
+          await c.waitUntilFirstFrameRendered.timeout(const Duration(seconds: 15));
+          final ttff = sw.elapsedMilliseconds;
+          await _waitFor(() async => await _timePos(np) > 0.0, const Duration(seconds: 10));
+          final moving = sw.elapsedMilliseconds;
+          await Future<void>.delayed(const Duration(milliseconds: 500));
+          return {'ttffMs': ttff, 'timePosAbove0Ms': moving};
+        }, logLevel: MPVLogLevel.v, maxLogs: 400),
+      );
     }
   }
 
@@ -520,6 +708,7 @@ class _BenchPageState extends State<BenchPage> with TickerProviderStateMixin {
         BenchConfig.mkCopy => const VideoControllerConfiguration(vo: 'gpu', hwdec: 'mediacodec-copy'),
         BenchConfig.mkGpuMediacodec => const VideoControllerConfiguration(vo: 'gpu', hwdec: 'mediacodec'),
         BenchConfig.mkEmbed => const VideoControllerConfiguration(vo: 'mediacodec_embed', hwdec: 'mediacodec'),
+        BenchConfig.mkAutosync || BenchConfig.mkNoAudio => const VideoControllerConfiguration(),
         BenchConfig.native ||
         BenchConfig.nativeTexture =>
           throw StateError('${cfg.name} is not a media_kit configuration'),
@@ -579,6 +768,9 @@ class _BenchPageState extends State<BenchPage> with TickerProviderStateMixin {
         wasBuffering = b;
       }),
     ];
+    // Before the VideoController: its setup gates every Player call.
+    if (cfg == BenchConfig.mkAutosync) await np.setProperty('autosync', '30');
+    if (cfg == BenchConfig.mkNoAudio) await np.setProperty('aid', 'no');
     final controller = VideoController(player, configuration: _videoConfig(cfg));
     setState(() {
       _status = '$clip · ${cfg.name}';
