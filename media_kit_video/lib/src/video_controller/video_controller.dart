@@ -80,9 +80,10 @@ class VideoController {
     player.platform?.isVideoControllerAttached = true;
 
     () async {
-      final completer = Completer();
-      WidgetsBinding.instance.addPostFrameCallback((_) => completer.complete());
-      await completer.future;
+      // The app's first frame, not the next one: a controller made between frames (a preload, a player
+      // made from async code while nothing animates) waited until something else drew, & one made while
+      // frames are off (a hidden window) waited for good, while the player's calls wait for this setup.
+      await WidgetsBinding.instance.waitUntilFirstFrameRasterized;
 
       try {
         if (NativeVideoController.supported) {

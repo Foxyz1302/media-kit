@@ -187,7 +187,10 @@ class NativePlayer extends PlatformPlayer {
       // Enter paused state.
       await _setPropertyFlag('pause', true);
 
-      if (playlist.any((media) => media.uri.startsWith('fd://'))) {
+      // A single [Media] is appended directly: writing & parsing a temporary playlist file costs ~13 ms
+      // per open on Android.
+      if (playlist.length == 1 ||
+          playlist.any((media) => media.uri.startsWith('fd://'))) {
         // The fd:// scheme is used to reference content:// URIs on Android.
         // The loadlist command does not support this by default, yielding "Refusing to load potentially unsafe URL from a playlist."
         // So, we fallback to loading each file individually.
@@ -2405,7 +2408,8 @@ class NativePlayer extends PlatformPlayer {
         // Keep that memory-only behaviour explicitly instead of writing every stream to flash storage.
         'cache-on-disk': Platform.isAndroid ? 'no' : 'yes',
         'hr-seek': 'yes',
-        'hr-seek-framedrop': 'no',
+        // mpv's default: frames before a precise seek's target may be dropped instead of fully decoded.
+        'hr-seek-framedrop': 'yes',
         'correct-downscaling': 'no',
         'linear-downscaling': 'no',
         'sigmoid-upscaling': 'no',
