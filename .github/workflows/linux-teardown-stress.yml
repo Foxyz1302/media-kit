@@ -3,8 +3,16 @@ name: Linux teardown stress
 on:
   push:
     branches:
-      - linux-render
+      - main
+      - integration
+    paths:
+      - "media_kit_video/linux/**"
+      - "media_kit_test/**"
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   stress:
