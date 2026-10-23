@@ -180,6 +180,10 @@ class NativePlayer extends PlatformPlayer {
       // Restore original state & reset public [PlayerState] & [PlayerStream] values e.g. width=null, height=null, subtitle=['', ''] etc.
       await stop(open: true, synchronized: false);
 
+      // mpv rejects seek until the new file is loaded; [seek] keeps requests until then.
+      _awaitingFile = playlist.isNotEmpty && index >= 0;
+      _pendingSeek = null;
+
       // Enter paused state.
       await _setPropertyFlag('pause', true);
 
@@ -246,6 +250,10 @@ class NativePlayer extends PlatformPlayer {
       isShuffleEnabled = false;
       isPlayingStateChangeAllowed = false;
       isBufferingStateChangeAllowed = false;
+      if (!open) {
+        _awaitingFile = false;
+        _pendingSeek = null;
+      }
 
       final commands = [
         ['stop'],
@@ -694,11 +702,17 @@ class NativePlayer extends PlatformPlayer {
       await waitForPlayerInitialization;
       await waitForVideoControllerInitializationIfAttached;
 
-      await _command([
-        'seek',
-        (duration.inMilliseconds / 1000).toStringAsFixed(4),
-        'absolute',
-      ]);
+      if (_awaitingFile) {
+        // Right after [open], mpv has no file to seek in yet & rejects the command. Keep the request &
+        // apply it on MPV_EVENT_FILE_LOADED.
+        _pendingSeek = duration;
+      } else {
+        await _command([
+          'seek',
+          (duration.inMilliseconds / 1000).toStringAsFixed(4),
+          'absolute',
+        ]);
+      }
 
       // It is self explanatory that PlayerState.completed & PlayerStream.completed must enter the false state if seek is called. Typically after EOF.
       // https://github.com/media-kit/media-kit/issues/221
@@ -1197,6 +1211,25 @@ class NativePlayer extends PlatformPlayer {
     await _setPropertyString(property, value);
   }
 
+  /// Sets [property] synchronously. Use this inside [onPreloadedHooks]: mpv waits for the hook, & the
+  /// asynchronous API would wait for a reply event that the blocked event loop cannot deliver.
+  void setPropertySync(String property, String value) {
+    if (disposed) {
+      throw AssertionError('[Player] has been disposed');
+    }
+    final name = property.toNativeUtf8();
+    final data = value.toNativeUtf8();
+    try {
+      _logError(
+        mpv.mpv_set_property_string(ctx, name.cast(), data.cast()),
+        'setPropertySync($property, $value)',
+      );
+    } finally {
+      calloc.free(name);
+      calloc.free(data);
+    }
+  }
+
   /// Retrieves the value of a property from the internal libmpv instance of this [Player].
   /// Please use this method only if you know what you are doing, existing methods in [Player] implementation are suited for the most use cases.
   ///
@@ -1479,6 +1512,27 @@ class NativePlayer extends PlatformPlayer {
       'event:${event.ref.event_id} ${event.ref.data.cast<Uint8>()}',
     );
 
+    if (event.ref.event_id == generated.mpv_event_id.MPV_EVENT_FILE_LOADED) {
+      _awaitingFile = false;
+      final pending = _pendingSeek;
+      _pendingSeek = null;
+      if (pending != null) {
+        // Not awaited: its reply arrives through this same, serialized event loop.
+        unawaited(_command([
+          'seek',
+          (pending.inMilliseconds / 1000).toStringAsFixed(4),
+          'absolute',
+        ]));
+      }
+    }
+    if (event.ref.event_id == generated.mpv_event_id.MPV_EVENT_END_FILE) {
+      final reason = event.ref.data.cast<generated.mpv_event_end_file>().ref.reason;
+      if (reason == generated.mpv_end_file_reason.MPV_END_FILE_REASON_ERROR) {
+        // The file being opened failed to load: there is nothing to seek in.
+        _awaitingFile = false;
+        _pendingSeek = null;
+      }
+    }
     if (event.ref.event_id == generated.mpv_event_id.MPV_EVENT_START_FILE) {
       if (isPlayingStateChangeAllowed) {
         state = state.copyWith(playing: true, completed: false);
@@ -2203,6 +2257,17 @@ class NativePlayer extends PlatformPlayer {
         // --------------------------------------------------
         mpv.mpv_hook_continue(ctx, prop.ref.id);
       }
+      if (prop.ref.name.cast<Utf8>().toDartString() == 'on_preloaded') {
+        for (final hook in onPreloadedHooks) {
+          try {
+            await hook.call();
+          } catch (exception, stacktrace) {
+            print(exception);
+            print(stacktrace);
+          }
+        }
+        mpv.mpv_hook_continue(ctx, prop.ref.id);
+      }
       if (prop.ref.name.cast<Utf8>().toDartString() == 'on_unload') {
         // --------------------------------------------------
         for (final hook in onUnloadHooks) {
@@ -2335,7 +2400,10 @@ class NativePlayer extends PlatformPlayer {
         'dscale': 'bilinear',
         'dither': 'no',
         'cache': 'yes',
-        'cache-on-disk': 'yes',
+        // On Android, mpv's default --demux-cache-dir (inside its config directory) does not exist:
+        // the disk cache always failed with "Failed to create file cache" & mpv fell back to memory.
+        // Keep that memory-only behaviour explicitly instead of writing every stream to flash storage.
+        'cache-on-disk': Platform.isAndroid ? 'no' : 'yes',
         'hr-seek': 'yes',
         'hr-seek-framedrop': 'no',
         'correct-downscaling': 'no',
@@ -2352,8 +2420,15 @@ class NativePlayer extends PlatformPlayer {
         'subs-with-matching-audio': 'yes',
       };
       // Other properties based on [PlayerConfiguration].
+      final audioClientName = _audioClientName;
       properties.addAll({
-        if (!configuration.osc) ...{'osc': 'no', 'osd-level': '0'},
+        if (audioClientName != null) 'audio-client-name': audioClientName,
+        if (!configuration.osc) ...{
+          // libmpv builds without Lua (e.g. Android) have no osc option; setting it there only logs
+          // "property not found".
+          if (_hasOption('osc')) 'osc': 'no',
+          'osd-level': '0',
+        },
         'title': configuration.title,
         'demuxer-max-bytes': configuration.bufferSize.toString(),
         'demuxer-max-back-bytes': configuration.bufferSize.toString(),
@@ -2441,6 +2516,10 @@ class NativePlayer extends PlatformPlayer {
       mpv.mpv_hook_add(ctx, 0, unload.cast(), 0);
       calloc.free(load);
       calloc.free(unload);
+      // [onPreloadedHooks]: e.g. attaching a video output before the decoders are created.
+      final preloaded = 'on_preloaded'.toNativeUtf8();
+      mpv.mpv_hook_add(ctx, 0, preloaded.cast(), 0);
+      calloc.free(preloaded);
 
       await NativeReferenceHolder.instance.add(ctx);
     });
@@ -2520,6 +2599,35 @@ class NativePlayer extends PlatformPlayer {
     calloc.free(ptr);
   }
 
+  /// The --audio-client-name to set, or null to keep mpv's default ("mpv"). See
+  /// [PlayerConfiguration.audioClientName].
+  String? get _audioClientName {
+    final custom = configuration.audioClientName;
+    if (custom != null) {
+      return custom.isEmpty ? null : custom;
+    }
+    if (!(Platform.isWindows || Platform.isLinux || Platform.isMacOS)) {
+      return null;
+    }
+    final name = basenameWithoutExtension(Platform.resolvedExecutable);
+    return name.isEmpty ? null : name;
+  }
+
+  /// Whether the libmpv build has the option [name]; some options only exist in certain builds.
+  bool _hasOption(String name) {
+    final property = 'option-info/$name/name'.toNativeUtf8();
+    try {
+      final value = mpv.mpv_get_property_string(ctx, property.cast());
+      if (value == nullptr) {
+        return false;
+      }
+      mpv.mpv_free(value.cast());
+      return true;
+    } finally {
+      calloc.free(property);
+    }
+  }
+
   Future<void> _setPropertyString(String name, String value) async {
     final string = value.toNativeUtf8();
     // API requires char**.
@@ -2593,6 +2701,16 @@ class NativePlayer extends PlatformPlayer {
 
   /// A flag to keep track of [setShuffle] calls.
   bool isShuffleEnabled = false;
+
+  /// Whether [open] started loading a file that mpv hasn't reported as loaded yet. mpv rejects `seek`
+  /// until then, so [seek] stores the last request in [_pendingSeek] & MPV_EVENT_FILE_LOADED applies it.
+  bool _awaitingFile = false;
+  Duration? _pendingSeek;
+
+  /// Hooks run inside mpv's `on_preloaded` hook: the demuxer is open & `track-list` is known, but no
+  /// decoders exist yet. mpv waits for them & this player's event loop is blocked meanwhile, so they
+  /// must only make synchronous mpv calls (see [setPropertySync]).
+  final List<Future<void> Function()> onPreloadedHooks = [];
 
   /// A flag to prevent changes to [state.playing] due to `loadfile` commands in [open].
   ///

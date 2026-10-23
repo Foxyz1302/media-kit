@@ -139,6 +139,12 @@ internal class VideoOutput(
         synchronized(lock) {
             Log.i(TAG, "onSurfaceAvailable")
             id = surfaceProducer.id()
+            // Every resize lands here with a new Surface. Release the previous global reference later,
+            // like onSurfaceCleanup does, once mpv has switched to the new --wid.
+            if (wid != 0L) {
+                val previous = wid
+                handler.postDelayed({ deleteGlobalObjectRef(previous) }, 5000L)
+            }
             wid = newGlobalObjectRef(surfaceProducer.surface)
             textureUpdateCallback.onTextureUpdate(
                 id,
@@ -161,6 +167,7 @@ internal class VideoOutput(
             if (wid != 0L) {
                 val widReference = wid
                 handler.postDelayed({ deleteGlobalObjectRef(widReference) }, 5000L)
+                wid = 0L
             }
         }
     }

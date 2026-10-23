@@ -52,8 +52,10 @@ gboolean isolated_egl_enter(EGLDisplay display,
                             EGLint* error);
 
 // Releases |display|'s context from the calling thread and makes current again
-// what isolated_egl_enter put aside.
-void isolated_egl_leave(EGLDisplay display, IsolatedEglSaved* saved);
+// what isolated_egl_enter put aside. Returns FALSE when the EGL context put
+// aside, or none, could not be made current again; |display|'s context is
+// released then too.
+gboolean isolated_egl_leave(EGLDisplay display, IsolatedEglSaved* saved);
 
 // Whether a texture of the current context reaches another context through an
 // EGLImage, as TextureGL hands mpv's frames to Flutter: the extensions of

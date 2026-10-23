@@ -143,14 +143,21 @@ gboolean isolated_egl_enter(EGLDisplay display,
   return FALSE;
 }
 
-void isolated_egl_leave(EGLDisplay display, IsolatedEglSaved* saved) {
+gboolean isolated_egl_leave(EGLDisplay display, IsolatedEglSaved* saved) {
+  gboolean restored;
   if (saved->gdk_context == NULL && saved->context != EGL_NO_CONTEXT) {
-    // An EGL context that is not GDK's, such as Flutter's on its raster thread
-    eglMakeCurrent(saved->display, saved->draw, saved->read, saved->context);
+    // An EGL context that is not GDK's, such as Flutter's on its raster thread;
+    // when it cannot come back, |display|'s context is released all the same
+    restored = eglMakeCurrent(saved->display, saved->draw, saved->read,
+                              saved->context);
+    if (!restored) {
+      eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    }
   } else {
     // Released on |display|: eglMakeCurrent with EGL_NO_DISPLAY releases
     // nothing where EGL is Mesa's without libglvnd
-    eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    restored = eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE,
+                              EGL_NO_CONTEXT);
   }
   if (saved->api != EGL_NONE) {
     eglBindAPI(saved->api);
@@ -161,6 +168,7 @@ void isolated_egl_leave(EGLDisplay display, IsolatedEglSaved* saved) {
     gdk_gl_context_make_current(saved->gdk_context);
     g_clear_object(&saved->gdk_context);
   }
+  return restored;
 }
 
 const gchar* isolated_egl_texture_sharing_problem(EGLDisplay display,
@@ -173,7 +181,8 @@ const gchar* isolated_egl_texture_sharing_problem(EGLDisplay display,
     return "the OpenGL ES context cannot read an EGLImage "
            "(no GL_OES_EGL_image)";
   }
-  // The functions TextureGL calls (texture_gl.cc), as it finds them
+  // The functions TextureGL calls (texture_gl.cc), which epoxy finds through
+  // eglGetProcAddress
   if (eglGetProcAddress("eglCreateImageKHR") == NULL ||
       eglGetProcAddress("eglDestroyImageKHR") == NULL ||
       eglGetProcAddress("glEGLImageTargetTexture2DOES") == NULL) {

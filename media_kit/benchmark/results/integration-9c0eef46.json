@@ -1,0 +1,345 @@
+{
+  "base": "integration 9c0eef46",
+  "runs": {
+    "jit": [
+      {
+        "benchmark": "event_path_bench",
+        "date": "2026-10-23T00:15:12.092410Z",
+        "compiler": "jit",
+        "dart": "3.13.5 (stable) (Tue Sep 29 01:00:52 2026 -0700) on \"linux_x64\"",
+        "host": "linux 12 cpus",
+        "git": {
+          "head": "9c0eef46",
+          "lib": "8551f90d",
+          "dirty": false
+        },
+        "media": "bench_720p60.mp4",
+        "seconds": 20,
+        "mpv": "mpv v0.41.0",
+        "ffmpeg": "n9.0.2",
+        "throughput": {
+          "seconds": 20.0,
+          "events": 51450,
+          "eventsPerSecond": 2572.4,
+          "positionsPerSecond": 2546.41,
+          "seekbarRepaintsPerSecond": 2546.41,
+          "labelChangesPerSecond": 51.85,
+          "cpu": {
+            "samplePeriodMicros": 500,
+            "samples": 5255,
+            "complete": true,
+            "busyPercent": 13.14,
+            "microsPerEvent": 51.069,
+            "handlerMicrosPerEvent": 6.229,
+            "drainLoopMicrosPerEvent": 30.612,
+            "mpvWaitEventMicrosPerEvent": 0.321,
+            "exclusivePercentByKind": {
+              "Collected": 0.0,
+              "Native": 71.97,
+              "Dart": 15.79,
+              "Stub": 9.31,
+              "Tag": 0.0
+            },
+            "nativeExclusivePercent": {
+              "[Native] /usr/lib/libc.so.6": 62.84,
+              "dart::Scavenger::TryAllocateNewTLAB": 1.75,
+              "mpv_wait_event": 0.57,
+              "pthread_mutex_lock": 0.53,
+              "clock_gettime": 0.44,
+              "__pthread_mutex_unlock": 0.34
+            },
+            "dartExclusivePercent": {
+              "Utf8Pointer.toDartString": 1.07,
+              "NativePlayer._handler": 0.97,
+              "InitializerNativeCallable._callback.<anonymous closure>": 0.86,
+              "_Utf8Decoder.convertSingle": 0.78,
+              "_RootZone.runUnaryGuarded": 0.74,
+              "BasicLock.synchronized": 0.61,
+              "_OneByteString.==": 0.53,
+              "InitializerNativeCallable.create.<anonymous closure>": 0.51,
+              "_OneByteString._concatAll": 0.51,
+              "MPV._mpv_wait_event.#ffiClosure43": 0.48,
+              "PlayerState.copyWith": 0.4,
+              "Pointer.cast": 0.38
+            }
+          },
+          "allocations": {
+            "seconds": 0.25,
+            "events": 716,
+            "_Closure": 11.892,
+            "_Double": 2.0,
+            "Pointer": 70.101,
+            "_OneByteString": 23.204,
+            "_TwoByteString": 0.0,
+            "Duration": 1.0,
+            "_Future": 5.194,
+            "PlayerState": 1.007,
+            "complete": true
+          }
+        },
+        "realtime": {
+          "seconds": 20.0,
+          "events": 1245,
+          "eventsPerSecond": 62.25,
+          "positionsPerSecond": 59.65,
+          "seekbarRepaintsPerSecond": 59.65,
+          "labelChangesPerSecond": 1.0,
+          "cpu": {
+            "samplePeriodMicros": 500,
+            "samples": 47,
+            "complete": null,
+            "busyPercent": 0.12,
+            "microsPerEvent": 18.876,
+            "handlerMicrosPerEvent": 0.0,
+            "drainLoopMicrosPerEvent": 8.434,
+            "mpvWaitEventMicrosPerEvent": 0.402,
+            "exclusivePercentByKind": {
+              "Collected": 0.0,
+              "Native": 40.43,
+              "Dart": 40.43,
+              "Stub": 8.51,
+              "Tag": 0.0
+            },
+            "nativeExclusivePercent": {
+              "dart::Scavenger::TryAllocateNewTLAB": 25.53,
+              "[Native] /usr/lib/libc.so.6": 6.38,
+              "DRT_AllocateContext": 2.13,
+              "DRT_InterruptOrStackOverflow": 2.13,
+              "mpv_wait_event": 2.13,
+              "pthread_cond_broadcast": 2.13
+            },
+            "dartExclusivePercent": {
+              "__Map&_LinkedHashBase&MapMixin&_HashBase&_OperatorEqualsAndHashCode&_LinkedHashMapMixin._getValueOrData": 10.64,
+              "_RawReceivePort._handleMessage": 8.51,
+              "_IntegerImplementation.==": 4.26,
+              "_RootZone.runUnaryGuarded": 4.26,
+              "_RootZone.bindUnaryCallbackGuarded.<anonymous closure>": 4.26,
+              "VMLibraryHooks.timerMillisecondClock": 2.13,
+              "InitializerNativeCallable._callback.<anonymous closure>": 2.13,
+              "InitializerNativeCallable.create.<anonymous closure>": 2.13,
+              "MPV._mpv_wait_event.#ffiClosure43": 2.13,
+              "_RawSocket.close": 0.0,
+              "URIParser._setFileOrDirectory": 0.0,
+              "URIParser.type=": 0.0
+            }
+          },
+          "allocations": {
+            "seconds": 3.0,
+            "events": 187,
+            "_Closure": 15.567,
+            "_Double": 5.813,
+            "Pointer": 69.973,
+            "_OneByteString": 23.647,
+            "_TwoByteString": 0.0,
+            "Duration": 0.957,
+            "_Future": 6.84,
+            "PlayerState": 0.968,
+            "complete": true
+          }
+        }
+      },
+      {
+        "benchmark": "event_path_bench",
+        "date": "2026-10-23T00:16:33.620928Z",
+        "compiler": "jit",
+        "dart": "3.13.5 (stable) (Tue Sep 29 01:00:52 2026 -0700) on \"linux_x64\"",
+        "host": "linux 12 cpus",
+        "git": {
+          "head": "9c0eef46",
+          "lib": "8551f90d",
+          "dirty": false
+        },
+        "media": "bench_720p60.mp4",
+        "seconds": 20,
+        "mpv": "mpv v0.41.0",
+        "ffmpeg": "n9.0.2",
+        "throughput": {
+          "seconds": 20.0,
+          "events": 53098,
+          "eventsPerSecond": 2654.98,
+          "positionsPerSecond": 2628.78,
+          "seekbarRepaintsPerSecond": 2628.78,
+          "labelChangesPerSecond": 52.45,
+          "cpu": {
+            "samplePeriodMicros": 500,
+            "samples": 4943,
+            "complete": true,
+            "busyPercent": 12.36,
+            "microsPerEvent": 46.546,
+            "handlerMicrosPerEvent": 5.612,
+            "drainLoopMicrosPerEvent": 26.96,
+            "mpvWaitEventMicrosPerEvent": 0.574,
+            "exclusivePercentByKind": {
+              "Collected": 0.0,
+              "Native": 73.17,
+              "Dart": 16.43,
+              "Stub": 8.01,
+              "Tag": 0.0
+            },
+            "nativeExclusivePercent": {
+              "[Native] /usr/lib/libc.so.6": 63.52,
+              "dart::Scavenger::TryAllocateNewTLAB": 1.36,
+              "mpv_wait_event": 1.13,
+              "pthread_mutex_lock": 0.75,
+              "clock_gettime": 0.61,
+              "dart::Object::HandleImpl": 0.36
+            },
+            "dartExclusivePercent": {
+              "Utf8Pointer.toDartString": 0.97,
+              "_Utf8Decoder.convertSingle": 0.89,
+              "InitializerNativeCallable._callback.<anonymous closure>": 0.89,
+              "_OneByteString.==": 0.65,
+              "BasicLock.synchronized": 0.57,
+              "PlayerState.copyWith": 0.53,
+              "MPV._mpv_wait_event.#ffiClosure43": 0.49,
+              "_OneByteString.contains": 0.45,
+              "mpv_event_property.name": 0.45,
+              "_OneByteString._concatAll": 0.42,
+              "_StringBase._interpolate": 0.42,
+              "_RootZone.runUnaryGuarded": 0.4
+            }
+          },
+          "allocations": {
+            "seconds": 0.25,
+            "events": 669,
+            "_Closure": 12.205,
+            "_Double": 1.979,
+            "Pointer": 69.72,
+            "_OneByteString": 23.07,
+            "_TwoByteString": 0.0,
+            "Duration": 0.99,
+            "_Future": 5.336,
+            "PlayerState": 1.001,
+            "complete": true
+          }
+        },
+        "realtime": {
+          "seconds": 20.0,
+          "events": 1245,
+          "eventsPerSecond": 62.25,
+          "positionsPerSecond": 59.65,
+          "seekbarRepaintsPerSecond": 59.65,
+          "labelChangesPerSecond": 1.0,
+          "cpu": {
+            "samplePeriodMicros": 500,
+            "samples": 113,
+            "complete": null,
+            "busyPercent": 0.28,
+            "microsPerEvent": 45.382,
+            "handlerMicrosPerEvent": 0.0,
+            "drainLoopMicrosPerEvent": 30.522,
+            "mpvWaitEventMicrosPerEvent": 0.0,
+            "exclusivePercentByKind": {
+              "Collected": 0.0,
+              "Native": 56.64,
+              "Dart": 26.55,
+              "Stub": 10.62,
+              "Tag": 0.0
+            },
+            "nativeExclusivePercent": {
+              "[Native] /usr/lib/libc.so.6": 24.78,
+              "dart::Scavenger::TryAllocateNewTLAB": 20.35,
+              "dart::Context::New": 1.77,
+              "dart::Mutex::Unlock": 0.88,
+              "dart::Object::HandleImpl": 0.88,
+              "void dart::UntaggedObject::StoreCompressedPointer<dart::ArrayPtr, dart::ArrayPtr, ": 0.88
+            },
+            "dartExclusivePercent": {
+              "_RootZone.runUnaryGuarded": 8.85,
+              "InitializerNativeCallable.create.<anonymous closure>": 7.96,
+              "_RawReceivePort._handleMessage": 2.65,
+              "__Map&_LinkedHashBase&MapMixin&_HashBase&_OperatorEqualsAndHashCode&_LinkedHashMapMixin._getValueOrData": 1.77,
+              "_RootZone.bindUnaryCallbackGuarded.<anonymous closure>": 1.77,
+              "_IntegerImplementation.==": 0.88,
+              "_GrowableList._GrowableList": 0.88,
+              "MPV._mpv_wait_event.#ffiClosure43": 0.88,
+              "Object.==": 0.88,
+              "_SocketStreamConsumer.stop": 0.0,
+              "URIParser._isFileOrDirectory": 0.0,
+              "_RegExp.hasMatch": 0.0
+            }
+          },
+          "allocations": {
+            "seconds": 3.0,
+            "events": 186,
+            "_Closure": 15.565,
+            "_Double": 5.812,
+            "Pointer": 69.973,
+            "_OneByteString": 23.651,
+            "_TwoByteString": 0.0,
+            "Duration": 0.957,
+            "_Future": 6.839,
+            "PlayerState": 0.968,
+            "complete": true
+          }
+        }
+      }
+    ],
+    "aot": [
+      {
+        "benchmark": "event_path_bench",
+        "date": "2026-10-23T00:17:38.136492Z",
+        "compiler": "aot",
+        "dart": "3.13.5 (stable) (Tue Sep 29 01:00:52 2026 -0700) on \"linux_x64\"",
+        "host": "linux 12 cpus",
+        "git": {
+          "head": "9c0eef46",
+          "lib": "8551f90d",
+          "dirty": false
+        },
+        "media": "bench_720p60.mp4",
+        "seconds": 20,
+        "mpv": "mpv v0.41.0",
+        "ffmpeg": "n9.0.2",
+        "throughput": {
+          "seconds": 20.0,
+          "events": 56707,
+          "eventsPerSecond": 2835.29,
+          "positionsPerSecond": 2808.69,
+          "seekbarRepaintsPerSecond": 2808.69,
+          "labelChangesPerSecond": 53.1
+        },
+        "realtime": {
+          "seconds": 20.0,
+          "events": 1244,
+          "eventsPerSecond": 62.2,
+          "positionsPerSecond": 59.6,
+          "seekbarRepaintsPerSecond": 59.6,
+          "labelChangesPerSecond": 1.0
+        }
+      },
+      {
+        "benchmark": "event_path_bench",
+        "date": "2026-10-23T00:18:30.218Z",
+        "compiler": "aot",
+        "dart": "3.13.5 (stable) (Tue Sep 29 01:00:52 2026 -0700) on \"linux_x64\"",
+        "host": "linux 12 cpus",
+        "git": {
+          "head": "9c0eef46",
+          "lib": "8551f90d",
+          "dirty": false
+        },
+        "media": "bench_720p60.mp4",
+        "seconds": 20,
+        "mpv": "mpv v0.41.0",
+        "ffmpeg": "n9.0.2",
+        "throughput": {
+          "seconds": 20.0,
+          "events": 52524,
+          "eventsPerSecond": 2626.09,
+          "positionsPerSecond": 2601.09,
+          "seekbarRepaintsPerSecond": 2601.09,
+          "labelChangesPerSecond": 50.15
+        },
+        "realtime": {
+          "seconds": 20.0,
+          "events": 1245,
+          "eventsPerSecond": 62.25,
+          "positionsPerSecond": 59.65,
+          "seekbarRepaintsPerSecond": 59.65,
+          "labelChangesPerSecond": 1.0
+        }
+      }
+    ]
+  }
+}

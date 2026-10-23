@@ -1,0 +1,21 @@
+name: media_kit_bench
+description: Automated Android playback benchmark for media_kit render/decoder configurations vs a native player.
+publish_to: none
+version: 1.0.0
+environment:
+  sdk: ^3.6.0
+resolution: workspace
+
+dependencies:
+  flutter:
+    sdk: flutter
+  media_kit:
+    path: ../media_kit
+  media_kit_libs_video:
+    path: ../libs/universal/media_kit_libs_video
+  media_kit_video:
+    path: ../media_kit_video
+  better_native_video_player: any
+
+flutter:
+  uses-material-design: true

@@ -79,7 +79,7 @@ class VideoControllerConfiguration {
   ///
   /// Default: Platform specific.
   /// * Windows, GNU/Linux, macOS & iOS : `auto`
-  /// * Android: `auto-safe`
+  /// * Android: `mediacodec,mediacodec-copy`
   final String? hwdec;
 
   /// The scale for the video output.

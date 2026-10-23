@@ -40,12 +40,16 @@ void VideoOutputManager::SetSize(int64_t handle,
   }).detach();
 }
 
-void VideoOutputManager::Dispose(int64_t handle) {
+void VideoOutputManager::Dispose(int64_t handle,
+                                 std::function<void()> on_disposed) {
   std::thread([=]() {
-    std::lock_guard<std::mutex> lock(global_mutex_);
-    if (video_outputs_.find(handle) != video_outputs_.end()) {
-      video_outputs_.erase(handle);
+    {
+      std::lock_guard<std::mutex> lock(global_mutex_);
+      if (video_outputs_.find(handle) != video_outputs_.end()) {
+        video_outputs_.erase(handle);
+      }
     }
+    on_disposed();
   }).detach();
 }
 
