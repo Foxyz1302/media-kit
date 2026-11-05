@@ -7,6 +7,7 @@
 import 'dart:async';
 import 'dart:ffi';
 import 'dart:io';
+import 'dart:isolate';
 
 import 'package:media_kit/ffi/src/allocation.dart';
 import 'package:media_kit/src/player/native/utils/temp_file.dart';
@@ -40,9 +41,13 @@ class NativeReferenceHolder {
   NativeReferenceHolder._();
 
   /// Initializes the instance.
+  ///
+  /// Only the main isolate holds references: hot-restart replaces the main isolate. Another isolate
+  /// that initialized media_kit would otherwise take the main isolate's live handles for leftovers.
   static void ensureInitialized(NativeReferenceHolderCallback callback) {
     if (!kDebugMode) return;
     if (initialized) return;
+    if (Isolate.current.debugName != 'main') return;
     initialized = true;
     instance._ensureInitialized(callback);
   }

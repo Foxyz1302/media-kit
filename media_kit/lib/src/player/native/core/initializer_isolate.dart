@@ -46,6 +46,7 @@ class InitializerIsolate {
     final receiver = ReceivePort();
     late SendPort port;
     late Pointer<generated.mpv_handle> handle;
+    final delivery = _Delivery(receiver);
     final isolate = await Isolate.spawn(_mainloop, receiver.sendPort);
     receiver.listen((message) async {
       if (!completer.isCompleted && message is SendPort) {
@@ -59,16 +60,31 @@ class InitializerIsolate {
       }
       // Forward events to the supplied callback.
       else if (message != null) {
+        // The helper waits for the answer before its next mpv_wait_event; a closed delivery drops the
+        // event & never answers.
+        if (delivery.closed) {
+          return;
+        }
         Pointer<generated.mpv_event> event = Pointer.fromAddress(message);
+        delivery.inFlight = true;
         try {
           await callback(event);
         } catch (exception, stacktrace) {
           print(exception.toString());
           print(stacktrace.toString());
+        } finally {
+          delivery.inFlight = false;
         }
-        port.send(true);
+        if (delivery.closed) {
+          delivery.settle();
+        } else {
+          port.send(true);
+        }
       } else {
+        // The helper left its loop: it won't call mpv_wait_event again.
+        delivery.exited = true;
         receiver.close();
+        delivery.settle();
       }
     });
     // Awaiting the retrieval of [Pointer<mpv_handle>].
@@ -77,26 +93,25 @@ class InitializerIsolate {
     // Save the references.
     _ports[handle.address] = port;
     _isolates[handle.address] = isolate;
+    _deliveries[handle.address] = delivery;
 
     return handle;
   }
 
-  /// Disposes [Pointer<mpv_handle>].
-  void dispose(generated.MPV mpv, Pointer<generated.mpv_handle> handle) {
-    final port = _ports[handle.address];
-    final isolate = _isolates[handle.address];
-    if (port != null && isolate != null) {
-      port.send(null);
-
-      _ports.remove(handle.address);
-      _isolates.remove(handle.address);
-
-      mpv.mpv_wakeup(handle);
-
-      Future.delayed(const Duration(seconds: 2), () {
-        isolate.kill(priority: Isolate.immediate);
-      });
+  /// Stops delivering the events of [handle]; see [Initializer.dispose].
+  Future<void> dispose(generated.MPV mpv, Pointer<generated.mpv_handle> handle) {
+    final port = _ports.remove(handle.address);
+    final isolate = _isolates.remove(handle.address);
+    final delivery = _deliveries.remove(handle.address);
+    if (port == null || isolate == null || delivery == null) {
+      return Future<void>.value();
     }
+    delivery.closed = true;
+    port.send(null);
+    mpv.mpv_wakeup(handle);
+    return delivery.done.future.whenComplete(() {
+      isolate.kill(priority: Isolate.immediate);
+    });
   }
 
   static void _mainloop(SendPort port) async {
@@ -119,11 +134,15 @@ class InitializerIsolate {
         mpv = generated.MPV(DynamicLibrary.open(message));
         completer.complete();
       } else if (message is bool) {
-        completer.complete();
+        if (!completer.isCompleted) {
+          completer.complete();
+        }
       } else if (message == null) {
         if (handle != null) {
           disposed = true;
-          completer.complete();
+          if (!completer.isCompleted) {
+            completer.complete();
+          }
         }
       }
     });
@@ -163,4 +182,30 @@ class InitializerIsolate {
 
   final _ports = HashMap<int, SendPort>();
   final _isolates = HashMap<int, Isolate>();
+  final _deliveries = HashMap<int, _Delivery>();
+}
+
+/// The event delivery of one mpv handle, on the side of the isolate that owns the handle.
+class _Delivery {
+  _Delivery(this.receiver);
+
+  final ReceivePort receiver;
+
+  /// Whether [InitializerIsolate.dispose] stopped the delivery.
+  bool closed = false;
+
+  /// Whether a callback is running.
+  bool inFlight = false;
+
+  /// Whether the helper isolate left its loop.
+  bool exited = false;
+
+  /// Completes once the delivery is closed, no callback runs & the helper left its loop.
+  final Completer<void> done = Completer<void>();
+
+  void settle() {
+    if (closed && exited && !inFlight && !done.isCompleted) {
+      done.complete();
+    }
+  }
 }

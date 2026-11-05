@@ -107,8 +107,10 @@ abstract class PlatformPlayer {
     errorController.stream,
   );
 
+  /// Runs the [release] callbacks, then closes the streams.
   @mustCallSuper
   Future<void> dispose() async {
+    await runReleaseCallbacks();
     await Future.wait([
       playlistController.close(),
       playingController.close(),
@@ -136,15 +138,63 @@ abstract class PlatformPlayer {
       logController.close(),
       errorController.close(),
     ]);
-    for (final callback in release) {
+  }
+
+  /// How many of the [release] callbacks have been started.
+  int _releaseCallbacksStarted = 0;
+
+  /// How long [dispose] waits for each [release] callback; null waits for as long as it takes.
+  @protected
+  Duration? get releaseCallbackTimeout => null;
+
+  /// Whether a [release] callback did not finish within [releaseCallbackTimeout].
+  @protected
+  bool releaseCallbacksTimedOut = false;
+
+  /// The [release] callbacks that did not finish within [releaseCallbackTimeout] & still run.
+  @protected
+  final Set<Future<void>> pendingReleaseCallbacks = <Future<void>>{};
+
+  /// Runs the [release] callbacks that haven't run yet, in order, each one once: a callback added
+  /// after a first run runs on the next one. Each one gets [releaseCallbackTimeout].
+  @protected
+  Future<void> runReleaseCallbacks() async {
+    while (_releaseCallbacksStarted < release.length) {
+      final callback = release[_releaseCallbacksStarted++];
+      final Future<void> future;
       try {
-        await callback.call();
+        future = callback.call();
       } catch (exception, stacktrace) {
         print(exception.toString());
         print(stacktrace.toString());
+        continue;
+      }
+      final done = future.then<void>(
+        (_) {},
+        onError: (Object exception, StackTrace stacktrace) {
+          print(exception.toString());
+          print(stacktrace.toString());
+        },
+      );
+      final timeout = releaseCallbackTimeout;
+      if (timeout == null) {
+        await done;
+        continue;
+      }
+      pendingReleaseCallbacks.add(done);
+      done.whenComplete(() => pendingReleaseCallbacks.remove(done));
+      try {
+        await done.timeout(timeout);
+      } on TimeoutException {
+        releaseCallbacksTimedOut = true;
+        print('media_kit: a release callback did not finish within $timeout.');
       }
     }
   }
+
+  /// Whether a [release] callback has not been started yet.
+  @protected
+  bool get releaseCallbacksPending => _releaseCallbacksStarted < release.length;
 
   Future<void> open(Playable playable, {bool play = true}) {
     throw UnimplementedError('[PlatformPlayer.open] is not implemented');

@@ -3,7 +3,9 @@
 library;
 
 import 'dart:async';
+import 'dart:ffi';
 
+import 'package:media_kit/generated/libmpv/bindings.dart' as generated;
 import 'package:media_kit/media_kit.dart';
 import 'package:test/test.dart';
 
@@ -303,7 +305,104 @@ void main() {
         completes,
         reason: 'dispose must be idempotent (DECISIONS.md, P1-C3)',
       );
-    }, tags: 'known-failing');
+    });
+  });
+
+  group('dispose races', () {
+    test('lifecycle-dispose-racing-calls', () async {
+      for (int i = 0; i < 6; i++) {
+        final player = await createPlayer();
+        final native = player.platform as NativePlayer;
+        await openAndPlay(player, videos()[i % 4]);
+        // Every call settles, with a value or an error: none hangs.
+        Future<Object?> settled(Future<Object?> call) =>
+            call.then<Object?>((value) => value, onError: (Object e) => e);
+        final calls = <String, Future<Object?>>{
+          'seek': settled(player.seek(const Duration(seconds: 2))),
+          'setVolume': settled(player.setVolume(0)),
+          'setRate': settled(player.setRate(1.25)),
+          'pause': settled(player.pause()),
+          'play': settled(player.play()),
+          'screenshot': settled(player.screenshot()),
+          'setProperty': settled(native.setProperty('speed', '1.5')),
+          'getProperty': settled(native.getProperty('time-pos')),
+          'command': settled(native.command(['seek', '1', 'absolute'])),
+          'observeProperty':
+              settled(native.observeProperty('volume', (_) async {})),
+        };
+        final dispose = player.dispose();
+        // Made after dispose: they throw.
+        final late = <String, Future<Object?>>{
+          'late-seek': settled(player.seek(Duration.zero)),
+          'late-setProperty': settled(native.setProperty('speed', '1.0')),
+          'late-command': settled(native.command(['stop'])),
+          'late-observeProperty':
+              settled(native.observeProperty('speed', (_) async {})),
+        };
+        await dispose.timeout(const Duration(seconds: 15));
+        for (final entry in {...calls, ...late}.entries) {
+          final result = await entry.value.timeout(
+            const Duration(seconds: 10),
+            onTimeout: () => fail('${entry.key} did not settle'),
+          );
+          if (late.containsKey(entry.key)) {
+            expect(result, isA<AssertionError>(), reason: entry.key);
+          }
+        }
+        await expectClosed(player);
+      }
+      // The process is still sound: another player plays.
+      final player = await createPlayer();
+      await openAndPlay(player, TestMedia.h264);
+    }, timeout: const Timeout(Duration(minutes: 2)));
+    test('lifecycle-no-events-after-dispose', () async {
+      final player = await createPlayer();
+      final native = player.platform as NativePlayer;
+      var disposed = false;
+      final late = <String>[];
+      await native.observeProperty('time-pos', (_) async {
+        if (disposed) late.add('observeProperty');
+      });
+      await native.observeEvent(
+        generated.mpv_event_id.MPV_EVENT_PROPERTY_CHANGE.value,
+        (_) async {
+          if (disposed) late.add('observeEvent');
+        },
+      );
+      final logs = <PlayerLog>[];
+      player.stream.log.listen(logs.add);
+      await openAndPlay(player, TestMedia.h264);
+      await player.dispose();
+      disposed = true;
+      await Future.delayed(const Duration(seconds: 1));
+      expect(late, isEmpty, reason: 'callbacks ran after dispose returned');
+      await expectClosed(player);
+      await expectLater(player.handle, throwsA(isA<AssertionError>()));
+    });
+    test('lifecycle-dispose-waits-for-event-in-flight', () async {
+      final player = await createPlayer();
+      final native = player.platform as NativePlayer;
+      final inFlight = Completer<void>();
+      var finished = false;
+      var reads = 0;
+      await native.observeEvent(
+        generated.mpv_event_id.MPV_EVENT_PROPERTY_CHANGE.value,
+        (event) async {
+          if (!inFlight.isCompleted) {
+            inFlight.complete();
+            await Future.delayed(const Duration(milliseconds: 500));
+            // The listener still holds the event: the handle must be alive.
+            reads += event.ref.event_id.value;
+            finished = true;
+          }
+        },
+      );
+      unawaited(player.open(Media(TestMedia.h264)));
+      await inFlight.future.timeout(const Duration(seconds: 10));
+      await player.dispose().timeout(const Duration(seconds: 15));
+      expect(finished, isTrue, reason: 'dispose returned before the listener');
+      expect(reads, generated.mpv_event_id.MPV_EVENT_PROPERTY_CHANGE.value);
+    });
   });
 
   group('isolation', () {
