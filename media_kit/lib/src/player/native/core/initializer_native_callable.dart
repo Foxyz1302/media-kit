@@ -238,7 +238,7 @@ void _guardian(List<Object?> arguments) {
             mpv.mpv_command_string(ctx, quit.cast());
             calloc.free(quit);
           } else {
-            mpv.mpv_terminate_destroy(ctx);
+            terminateDestroy(mpv, ctx);
           }
         }
         guarded.clear();

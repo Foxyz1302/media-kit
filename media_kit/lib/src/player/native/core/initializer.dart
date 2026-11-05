@@ -5,7 +5,10 @@
 /// Use of this source code is governed by MIT license that can be found in the LICENSE file.
 
 import 'dart:ffi';
+import 'dart:io';
 import 'dart:isolate';
+
+import 'package:media_kit/ffi/ffi.dart';
 
 import 'package:media_kit/generated/libmpv/bindings.dart' as generated;
 import 'package:media_kit/src/player/native/core/execmem_restriction.dart';
@@ -93,12 +96,54 @@ class Initializer {
   }
 }
 
-/// Runs `mpv_terminate_destroy` on the handle at [address] in a new isolate & completes once done.
+/// Runs [terminateDestroy] on the handle at [address] in a new isolate & completes once done.
 Future<void> terminateDestroyElsewhere(String libmpv, int address) {
   return Isolate.run(
-    () => generated.MPV(DynamicLibrary.open(libmpv)).mpv_terminate_destroy(
+    () => terminateDestroy(
+      generated.MPV(DynamicLibrary.open(libmpv)),
       Pointer<generated.mpv_handle>.fromAddress(address),
     ),
     debugName: 'media_kit: mpv_terminate_destroy',
   );
+}
+
+/// `mpv_terminate_destroy` on this thread.
+///
+/// On Windows, the thread joins COM's multithreaded apartment first. mpv creates the WASAPI hotplug
+/// (for `audio-device-list`) on its core thread inside the MTA, but releases it on the thread that
+/// destroys the handle, after the core thread exited, & then calls `CoUninitialize` there
+/// (`ao_wasapi.c` `hotplug_uninit`). On a thread outside the MTA the device enumerator can already be
+/// gone (an access violation in `IMMDeviceEnumerator::UnregisterEndpointNotificationCallback`), & on
+/// a thread with its own COM (the UI thread) that `CoUninitialize` would take its COM away.
+void terminateDestroy(
+  generated.MPV mpv,
+  Pointer<generated.mpv_handle> ctx,
+) {
+  if (!Platform.isWindows) {
+    mpv.mpv_terminate_destroy(ctx);
+    return;
+  }
+  final ole32 = DynamicLibrary.open('ole32.dll');
+  final coInitializeEx = ole32.lookupFunction<
+      Int32 Function(Pointer<Void>, Uint32),
+      int Function(Pointer<Void>, int)>('CoInitializeEx');
+  final coUninitialize =
+      ole32.lookupFunction<Void Function(), void Function()>('CoUninitialize');
+  final coGetApartmentType = ole32.lookupFunction<
+      Int32 Function(Pointer<Int32>, Pointer<Int32>),
+      int Function(Pointer<Int32>, Pointer<Int32>)>('CoGetApartmentType');
+  const coinitMultithreaded = 0x0;
+  final joined = coInitializeEx(nullptr, coinitMultithreaded) >= 0;
+  mpv.mpv_terminate_destroy(ctx);
+  if (joined) {
+    // mpv's hotplug_uninit, when it ran, already called CoUninitialize once on this thread.
+    final type = calloc<Int32>(2);
+    try {
+      if (coGetApartmentType(type, type + 1) >= 0) {
+        coUninitialize();
+      }
+    } finally {
+      calloc.free(type);
+    }
+  }
 }
