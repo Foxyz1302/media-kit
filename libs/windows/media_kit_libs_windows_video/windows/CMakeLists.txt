@@ -69,22 +69,31 @@ endfunction()
 # Find 7zip for extracting the libmpv and ANGLE archives.
 find_program(SEVENZ_EXECUTABLE NAMES 7z 7za)
 
-# libmpv 0.41.0 release artifacts.
-set(LIBMPV_RELEASE "20260926")
-set(LIBMPV_BUILD_DATE "20260926")
-set(LIBMPV_REVISION_SHORT "41f6a64506")
+# libmpv release artifacts of freeKC/libmpv-builds: mpv 0b7ed670 and FFmpeg
+# 5b9a3ad7, GNU LGPL version 3 or later as built.
+set(LIBMPV_RELEASE "20261021-1")
+set(LIBMPV_BUILD_DATE "20261021")
+set(LIBMPV_REVISION_SHORT "0b7ed67")
+set(
+  LIBMPV_SOURCES_URL
+  "https://github.com/freeKC/libmpv-builds/releases/download/${LIBMPV_RELEASE}/libmpv-windows-${LIBMPV_RELEASE}-sources.tar.xz"
+)
+set(
+  LIBMPV_SOURCES_SHA256
+  "77e612c8110b1731c9b180cda840bb965939440c743d480f34cab957861e9d11"
+)
 
 if("${FLUTTER_TARGET_PLATFORM}" STREQUAL "windows-x64")
   set(LIBMPV_ARCH "x86_64")
   set(
     LIBMPV_SHA256
-    "e0cdd037bf363b0a9d0e1b9a41b75aaf333996b98e6b07ff9c00fa96e9830d9a"
+    "b3d1a4b3a8e202c28369a46f5fb776baa0742e38de8c9d0757b0255bcb8223d1"
   )
 elseif("${FLUTTER_TARGET_PLATFORM}" STREQUAL "windows-arm64")
   set(LIBMPV_ARCH "aarch64")
   set(
     LIBMPV_SHA256
-    "dd59d07e31bfdf652e6baa660c3a5a1ae0cca5eed368e1b28d5b03549cf91fd7"
+    "f5f597b2f85804d82907bcd3784f6943c0f55caca120dad75e258352d9fb3dbb"
   )
 else()
   message(
@@ -100,7 +109,7 @@ set(
 )
 set(
   LIBMPV_URL
-  "https://github.com/Carapacik/libmpv-win32-video-cmake/releases/download/${LIBMPV_RELEASE}/${LIBMPV}"
+  "https://github.com/freeKC/libmpv-builds/releases/download/${LIBMPV_RELEASE}/${LIBMPV}"
 )
 
 set(LIBMPV_ARCHIVE "${CMAKE_BINARY_DIR}/${LIBMPV}")
@@ -108,6 +117,9 @@ set(LIBMPV_SRC "${CMAKE_BINARY_DIR}/libmpv")
 set(LIBMPV_INCLUDE_DIR "${LIBMPV_SRC}/include/mpv")
 set(LIBMPV_IMPORT_LIBRARY "${LIBMPV_SRC}/libmpv.dll.a")
 set(LIBMPV_RUNTIME_LIBRARY "${LIBMPV_SRC}/libmpv-2.dll")
+set(LIBMPV_BUILDINFO "${LIBMPV_SRC}/BUILDINFO.txt")
+set(LIBMPV_LICENSES_DIR "${LIBMPV_SRC}/licenses")
+set(LIBMPV_LICENSES "${CMAKE_BINARY_DIR}/libmpv-licenses.txt")
 
 download_and_verify_sha256(
   "${LIBMPV_URL}"
@@ -123,6 +135,9 @@ set(
   "${LIBMPV_INCLUDE_DIR}/stream_cb.h"
   "${LIBMPV_IMPORT_LIBRARY}"
   "${LIBMPV_RUNTIME_LIBRARY}"
+  "${LIBMPV_BUILDINFO}"
+  "${LIBMPV_LICENSES_DIR}/ffmpeg/COPYING.LGPLv3"
+  "${LIBMPV_LICENSES_DIR}/mpv/LICENSE.LGPL"
 )
 
 # Always recreate staging from the verified archive to prevent stale files.
@@ -167,6 +182,33 @@ foreach(LIBMPV_REQUIRED_FILE IN LISTS LIBMPV_REQUIRED_FILES)
       "libmpv archive is missing required file: ${LIBMPV_REQUIRED_FILE}"
     )
   endif()
+endforeach()
+
+file(
+  WRITE
+  "${LIBMPV_LICENSES}"
+  "libmpv-2.dll: mpv and FFmpeg, GNU LGPL version 3 or later as built.\n"
+  "Binary: ${LIBMPV_URL}\n"
+  "SHA-256: ${LIBMPV_SHA256}\n"
+  "Corresponding source: ${LIBMPV_SOURCES_URL}\n"
+  "SHA-256: ${LIBMPV_SOURCES_SHA256}\n\n"
+)
+file(READ "${LIBMPV_BUILDINFO}" LIBMPV_BUILDINFO_TEXT)
+file(APPEND "${LIBMPV_LICENSES}" "${LIBMPV_BUILDINFO_TEXT}")
+file(
+  GLOB_RECURSE
+  LIBMPV_LICENSE_FILES
+  RELATIVE "${LIBMPV_LICENSES_DIR}"
+  "${LIBMPV_LICENSES_DIR}/*"
+)
+list(SORT LIBMPV_LICENSE_FILES)
+foreach(LIBMPV_LICENSE_FILE IN LISTS LIBMPV_LICENSE_FILES)
+  file(READ "${LIBMPV_LICENSES_DIR}/${LIBMPV_LICENSE_FILE}" LIBMPV_LICENSE_TEXT)
+  file(
+    APPEND
+    "${LIBMPV_LICENSES}"
+    "\n==== ${LIBMPV_LICENSE_FILE} ====\n\n${LIBMPV_LICENSE_TEXT}"
+  )
 endforeach()
 
 # ------------------------------------------------------------------------------
@@ -316,6 +358,7 @@ target_link_libraries(
 set(
   media_kit_libs_windows_video_bundled_libraries
   "${LIBMPV_RUNTIME_LIBRARY}"
+  "${LIBMPV_LICENSES}"
   "${ANGLE_LIB_DIR}/d3dcompiler_47.dll"
   "${ANGLE_LIB_DIR}/libEGL.dll"
   "${ANGLE_LIB_DIR}/libGLESv2.dll"

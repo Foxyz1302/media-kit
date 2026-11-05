@@ -536,6 +536,17 @@ class PlayerConfiguration {
   /// Learn more: https://ffmpeg.org/ffmpeg-protocols.html#Protocol-Options
   final List<String> protocolWhitelist;
 
+  /// Whether the native backend verifies TLS certificates when it opens HTTPS (& other TLS) media, i.e.
+  /// mpv's [`--tls-verify`](https://mpv.io/manual/stable/#options-tls-verify).
+  ///
+  /// The libmpv that `package:media_kit_libs_windows_video` bundles verifies certificates by default,
+  /// but its OpenSSL has no CA store on Windows, so every HTTPS open would fail. On Windows, `null`
+  /// therefore sets `tls-verify=no`, accepting any certificate as the earlier bundled builds did. To
+  /// verify, pass `true` and give mpv a CA bundle through the `tls-ca-file` property.
+  ///
+  /// Default: `null`, `false` on Windows & mpv's own default elsewhere.
+  final bool? tlsVerify;
+
   /// Whether [Player] should let mpv configure and activate the global
   /// `AVAudioSession` on iOS.
   ///
@@ -581,6 +592,7 @@ class PlayerConfiguration {
       'crypto',
     ],
     this.iosManageAudioSession = true,
+    this.tlsVerify,
   });
 }
 
