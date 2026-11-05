@@ -403,6 +403,40 @@ void main() {
       expect(finished, isTrue, reason: 'dispose returned before the listener');
       expect(reads, generated.mpv_event_id.MPV_EVENT_PROPERTY_CHANGE.value);
     });
+    test('lifecycle-dispose-defers-destroy-for-stuck-listener', () async {
+      final player = await createPlayer();
+      final native = player.platform as NativePlayer;
+      final entered = Completer<void>();
+      final release = Completer<void>();
+      var reads = 0;
+      await native.observeEvent(
+        generated.mpv_event_id.MPV_EVENT_PROPERTY_CHANGE.value,
+        (event) async {
+          if (!entered.isCompleted) {
+            entered.complete();
+            await release.future;
+            reads += event.ref.event_id.value;
+          }
+        },
+      );
+      unawaited(player.open(Media(TestMedia.h264)));
+      await entered.future.timeout(const Duration(seconds: 10));
+      // dispose gives up waiting for the listener, but must not destroy the handle it still reads.
+      await player.dispose().timeout(const Duration(seconds: 30));
+      expect(await player.handle, isNot(0), reason: 'destroyed under the listener');
+      release.complete();
+      await waitUntil(
+        () => reads > 0,
+        reason: 'the listener finished',
+      );
+      var destroyed = false;
+      final clock = Stopwatch()..start();
+      while (!destroyed && clock.elapsed < const Duration(seconds: 10)) {
+        destroyed = await player.handle.then((_) => false, onError: (_) => true);
+        await Future.delayed(const Duration(milliseconds: 50));
+      }
+      expect(destroyed, isTrue, reason: 'never destroyed after the listener finished');
+    }, timeout: const Timeout(Duration(minutes: 1)));
   });
 
   group('isolation', () {

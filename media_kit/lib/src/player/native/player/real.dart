@@ -162,9 +162,10 @@ class NativePlayer extends PlatformPlayer {
 
     // No event reaches [_handler] anymore, & no native call starts from this player.
     _detached = true;
+    final eventsStopped = _eventsStopped = Initializer(mpv).dispose(ctx);
     var drained = true;
     try {
-      await Initializer(mpv).dispose(ctx).timeout(_disposeStepTimeout);
+      await eventsStopped.timeout(_disposeStepTimeout);
     } on TimeoutException {
       drained = false;
       print('media_kit: NativePlayer: dispose: an event handler is still running.');
@@ -208,7 +209,7 @@ class NativePlayer extends PlatformPlayer {
         await videoControllerCompleter.future;
       }
       await Future.wait([
-        Initializer(mpv).dispose(ctx),
+        if (_eventsStopped != null) _eventsStopped!,
         ...pendingReleaseCallbacks,
         ..._nativeWork,
       ]);
@@ -269,6 +270,9 @@ class NativePlayer extends PlatformPlayer {
 
   /// Whether [dispose] stopped the events of [ctx]; set once, before the handle is destroyed.
   bool _detached = false;
+
+  /// Completes once no event handler runs & nothing waits in mpv_wait_event on [ctx] anymore.
+  Future<void>? _eventsStopped;
 
   /// Whether [ctx] is in [NativeReferenceHolder].
   bool _heldReference = false;

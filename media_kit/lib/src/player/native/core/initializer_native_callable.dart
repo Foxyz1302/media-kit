@@ -47,7 +47,16 @@ class InitializerNativeCallable {
     Future<void> Function(Pointer<generated.mpv_event>) callback, {
     Map<String, String> options = const {},
   }) async {
-    final guardian = await (_guardianFuture ??= _spawnGuardian());
+    final Future<_Guardian> spawning = _guardianFuture ??= _spawnGuardian();
+    final _Guardian guardian;
+    try {
+      guardian = await spawning;
+    } catch (_) {
+      if (identical(_guardianFuture, spawning)) {
+        _guardianFuture = null;
+      }
+      rethrow;
+    }
     final ctx = mpv.mpv_create();
     if (ctx == nullptr) {
       return ctx;
