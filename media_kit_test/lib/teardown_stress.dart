@@ -18,6 +18,10 @@
 ///   STRESS_SHADERS          glsl-shaders value, e.g. an Anime4K chain
 ///   STRESS_SEED             random seed
 ///   STRESS_BENCH_SECONDS    bench: measured seconds (20)
+///   STRESS_AO               bench: mpv ao, e.g. pulse
+///   STRESS_HZ               bench: the monitor's refresh rate; frames whose
+///                           total span exceeds its period count as late
+///                           (not counted without it)
 ///   STRESS_SIZE             bench, shot: fixed output size, WIDTHxHEIGHT
 ///   STRESS_SHOT             shot: PNG of the texture at 0.5 s of the first
 ///                           clip, as Flutter draws it, 2x a 640x360 lane
@@ -59,6 +63,7 @@ final _sequenced = _environment['STRESS_SEQUENCED'] == '1';
 final _shaders = _environment['STRESS_SHADERS'];
 final _seed = _integer('STRESS_SEED', DateTime.now().millisecondsSinceEpoch);
 final _benchSeconds = _integer('STRESS_BENCH_SECONDS', 20);
+final _hz = double.tryParse(_environment['STRESS_HZ'] ?? '');
 final _benchSize = _environment['STRESS_SIZE'];
 final _hwdec = _environment['STRESS_HWDEC'];
 final _mpvLogLevel = MPVLogLevel.values.firstWhere(
@@ -190,6 +195,7 @@ class _StressScreenState extends State<StressScreen>
       configuration: PlayerConfiguration(
         bufferSize: 4 * 1024 * 1024,
         logLevel: _mpvLogLevel,
+        muted: true,
       ),
     );
     player.stream.log.listen(
@@ -353,6 +359,10 @@ class _StressScreenState extends State<StressScreen>
       });
       final native = player.platform as NativePlayer;
       await native.setProperty('loop-file', 'inf');
+      final ao = _environment['STRESS_AO'];
+      if (ao != null) {
+        await native.setProperty('ao', ao);
+      }
       await player.open(Media(_clips[i % _clips.length]));
       final shaders = _shaders;
       if (shaders != null) {
@@ -369,7 +379,17 @@ class _StressScreenState extends State<StressScreen>
     void collect(List<FrameTiming> list) => timings.addAll(list);
     SchedulerBinding.instance.addTimingsCallback(collect);
     _update(() => _status = 'measuring');
-    await Future.delayed(Duration(seconds: _benchSeconds));
+    final first = players.first.platform as NativePlayer;
+    final avsync = <double>[];
+    final drift = <double>[];
+    for (var i = 0; i < _benchSeconds * 10; i++) {
+      await Future.delayed(const Duration(milliseconds: 100));
+      final sync = double.tryParse(await first.getProperty('avsync'));
+      final audio = double.tryParse(await first.getProperty('audio-pts'));
+      final position = double.tryParse(await first.getProperty('time-pos'));
+      if (sync != null) avsync.add(sync * 1000);
+      if (audio != null && position != null) drift.add((audio - position) * 1000);
+    }
     SchedulerBinding.instance.removeTimingsCallback(collect);
     String percentiles(List<int> values) {
       values.sort();
@@ -383,6 +403,26 @@ class _StressScreenState extends State<StressScreen>
         'size=${_benchSize ?? 'video'} players=$_lanes');
     _log('bench raster ${percentiles(timings.map((e) => e.rasterDuration.inMicroseconds).toList())}');
     _log('bench build ${percentiles(timings.map((e) => e.buildDuration.inMicroseconds).toList())}');
+    _log('bench total ${percentiles(timings.map((e) => e.totalSpan.inMicroseconds).toList())}');
+    final hz = _hz;
+    if (hz != null) {
+      final period = 1e6 / hz;
+      final late = timings.where((e) => e.totalSpan.inMicroseconds > period);
+      _log('bench late=${late.length}/${timings.length} '
+          'hz=$hz fps=${(timings.length / _benchSeconds).toStringAsFixed(1)}');
+    }
+    String spread(List<double> values) {
+      if (values.isEmpty) return 'none';
+      final sorted = [...values]..sort();
+      final mean = values.reduce((a, b) => a + b) / values.length;
+      return 'mean=${mean.toStringAsFixed(1)} min=${sorted.first.toStringAsFixed(1)} '
+          'max=${sorted.last.toStringAsFixed(1)} '
+          'first=${values.first.toStringAsFixed(1)} '
+          'last=${values.last.toStringAsFixed(1)} ms n=${values.length}';
+    }
+
+    _log('bench avsync ${spread(avsync)}');
+    _log('bench audio-pts-time-pos ${spread(drift)}');
     for (final player in players) {
       final native = player.platform as NativePlayer;
       final values = <String>[];
@@ -391,6 +431,8 @@ class _StressScreenState extends State<StressScreen>
         'frame-drop-count',
         'decoder-frame-drop-count',
         'vo-delayed-frame-count',
+        'video-timing-offset',
+        'current-ao',
         'video-out-params/w',
         'video-out-params/h',
       ]) {
