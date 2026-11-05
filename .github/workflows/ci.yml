@@ -51,7 +51,7 @@ jobs:
       - run: sudo apt-get update
       - run: >
           sudo apt-get install clang cmake ninja-build pkg-config libgtk-3-dev
-          mpv libmpv-dev dpkg-dev p7zip-full p7zip-rar
+          mpv libmpv-dev dpkg-dev p7zip-full
       - uses: subosito/flutter-action@v2
         with:
           channel: "stable"
@@ -95,7 +95,7 @@ jobs:
       - run: sudo apt-get update
       - run: >
           sudo apt-get install clang cmake ninja-build pkg-config libgtk-3-dev
-          mpv libmpv-dev dpkg-dev p7zip-full p7zip-rar
+          mpv libmpv-dev dpkg-dev p7zip-full
       - uses: subosito/flutter-action@v2
         with:
           channel: "stable"
@@ -149,7 +149,7 @@ jobs:
       - run: sudo apt-get update
       - run: >
           sudo apt-get install clang cmake ninja-build pkg-config libgtk-3-dev
-          mpv libmpv-dev dpkg-dev p7zip-full p7zip-rar
+          mpv libmpv-dev dpkg-dev p7zip-full
       - uses: subosito/flutter-action@v2
         with:
           channel: "stable"
@@ -279,7 +279,7 @@ jobs:
       - run: sudo apt-get update
       - run: >
           sudo apt-get install clang cmake ninja-build pkg-config libgtk-3-dev
-          mpv libmpv-dev dpkg-dev p7zip-full p7zip-rar
+          mpv libmpv-dev dpkg-dev p7zip-full
       - uses: subosito/flutter-action@v2
         with:
           channel: "stable"
@@ -354,7 +354,7 @@ jobs:
       - run: sudo apt-get update
       - run: >
           sudo apt-get install clang cmake ninja-build pkg-config libgtk-3-dev
-          mpv libmpv-dev dpkg-dev p7zip-full p7zip-rar
+          mpv libmpv-dev dpkg-dev p7zip-full
       - uses: subosito/flutter-action@v2
         with:
           channel: "stable"

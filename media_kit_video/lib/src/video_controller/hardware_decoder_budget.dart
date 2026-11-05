@@ -10,6 +10,8 @@ import 'package:flutter/foundation.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:synchronized/synchronized.dart';
 
+import 'package:media_kit_video/src/video_controller/video_controller.dart';
+
 /// One player's share of the process-wide hardware decoder budget ([VideoController.maxHardwareDecoders]).
 ///
 /// The decision is made per file, in mpv's `on_preloaded` hook, before mpv creates the decoders: within the
@@ -18,7 +20,7 @@ import 'package:synchronized/synchronized.dart';
 /// put on the CPU by the budget asks again when it starts playing.
 class HardwareDecoderBudget {
   /// See [VideoController.maxHardwareDecoders].
-  static int? max;
+  static int? get max => VideoController.maxHardwareDecoders;
 
   /// The players whose current file decodes on hardware, or is about to.
   static final _holders = <HardwareDecoderBudget>{};

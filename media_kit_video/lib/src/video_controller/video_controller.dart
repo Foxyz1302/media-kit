@@ -9,7 +9,6 @@ import 'dart:async';
 import 'package:flutter/widgets.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/src/video_controller/android_video_controller/android_video_controller.dart';
-import 'package:media_kit_video/src/video_controller/hardware_decoder_budget.dart';
 import 'package:media_kit_video/src/video_controller/native_video_controller/native_video_controller.dart';
 import 'package:media_kit_video/src/video_controller/platform_video_controller.dart';
 import 'package:media_kit_video/src/video_controller/web_video_controller/web_video_controller.dart';
@@ -83,12 +82,14 @@ class VideoController {
   /// Mobile chips allow few hardware decoders per codec (e.g. 6 for VP9 on a Snapdragon 7s Gen 2), & a
   /// feed that preloads its neighbours can take them all; on some desktop drivers several hardware decodes
   /// at once corrupt the display.
-  static int? get maxHardwareDecoders => HardwareDecoderBudget.max;
+  static int? get maxHardwareDecoders => _maxHardwareDecoders;
 
   static set maxHardwareDecoders(int? value) {
     assert(value == null || value >= 0);
-    HardwareDecoderBudget.max = value;
+    _maxHardwareDecoders = value;
   }
+
+  static int? _maxHardwareDecoders;
 
   /// Views given to [setViewSize] before [platform] was up.
   final _viewSizes = <Object, ({Size size, BoxFit fit, double? aspectRatio})>{};
