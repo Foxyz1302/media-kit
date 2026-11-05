@@ -17,13 +17,12 @@ The arm64 DLL has no OpenGL, so `package:media_kit_video` draws video in softwar
 
 ### TLS
 
-This mpv verifies TLS certificates by default (`tls-verify=yes`), and its OpenSSL looks for CA certificates only in a directory of the machine that built it. HTTPS media therefore fails to open unless the app gives mpv a CA bundle:
+This mpv verifies TLS certificates by default, and its OpenSSL looks for CA certificates only in a directory of the machine that built it, so with verification on, HTTPS media fails to open. `package:media_kit` therefore sets `tls-verify=no` on Windows unless the app sets `PlayerConfiguration.tlsVerify`: any certificate is accepted, as with the earlier builds. To verify certificates, give mpv a CA bundle:
 
 ```dart
+final player = Player(configuration: const PlayerConfiguration(tlsVerify: true));
 await (player.platform as NativePlayer).setProperty('tls-ca-file', path);
 ```
-
-`tls-verify=no` restores the behaviour of the earlier builds, which accepted any certificate.
 
 ### Licence
 
