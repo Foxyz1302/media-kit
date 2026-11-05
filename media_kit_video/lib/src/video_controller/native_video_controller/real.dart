@@ -13,6 +13,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/src/utils/query_decoders.dart';
+import 'package:media_kit_video/src/video_controller/hardware_decoder_budget.dart';
 import 'package:media_kit_video/src/video_controller/platform_video_controller.dart';
 import 'package:synchronized/synchronized.dart';
 
@@ -81,6 +82,9 @@ class NativeVideoController extends PlatformVideoController {
       (width == null || height == null);
 
   NativePlayer get platform => player.platform as NativePlayer;
+
+  /// This player's share of [VideoController.maxHardwareDecoders].
+  HardwareDecoderBudget? _budget;
 
   Future<void> setProperty(String key, String value) async {
     await platform.setProperty(key, value, waitForInitialization: false);
@@ -174,6 +178,13 @@ class NativeVideoController extends PlatformVideoController {
 
     // Register [_dispose] for execution upon [Player.dispose].
     player.platform?.release.add(controller._dispose);
+    final budget = controller._budget = HardwareDecoderBudget(
+      player,
+      configuration.hwdec!,
+      visible: () => controller._views.isNotEmpty,
+    );
+    controller.platform.onPreloadedHooks.add(budget.onPreloaded);
+    controller.platform.onUnloadHooks.add(budget.onUnload);
 
     // Store the [NativeVideoController] in the [_controllers].
     _controllers[handle] = controller;
@@ -427,6 +438,12 @@ class NativeVideoController extends PlatformVideoController {
     _disposed = true;
     _settle?.cancel();
     _views.clear();
+    final budget = _budget;
+    if (budget != null) {
+      platform.onPreloadedHooks.remove(budget.onPreloaded);
+      platform.onUnloadHooks.remove(budget.onUnload);
+      budget.dispose();
+    }
     super.dispose();
     await videoParamsSubscription?.cancel();
     final handle = await player.handle;

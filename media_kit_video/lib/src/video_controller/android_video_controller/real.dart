@@ -14,6 +14,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/src/utils/query_decoders.dart';
+import 'package:media_kit_video/src/video_controller/hardware_decoder_budget.dart';
 import 'package:media_kit_video/src/video_controller/native_video_controller/native_video_controller.dart';
 import 'package:media_kit_video/src/video_controller/platform_video_controller.dart';
 import 'package:synchronized/synchronized.dart';
@@ -72,6 +73,10 @@ class AndroidVideoController extends PlatformVideoController {
       (configuration.vo == 'gpu' || configuration.vo == 'gpu-next');
 
   NativePlayer get platform => player.platform as NativePlayer;
+
+  /// This player's share of [VideoController.maxHardwareDecoders]; none with `mediacodec_embed`, which
+  /// can only show hardware-decoded video.
+  HardwareDecoderBudget? _budget;
 
   /// The Surface size for a [width] x [height] video: the video's own size, scaled down (aspect ratio
   /// kept) to fit the display's physical resolution in the video's orientation. A 4K video on a phone
@@ -458,6 +463,15 @@ class AndroidVideoController extends PlatformVideoController {
 
     // Register [_dispose] for execution upon [Player.dispose].
     player.platform?.release.add(controller._dispose);
+    if (configuration.vo != 'mediacodec_embed') {
+      final budget = controller._budget = HardwareDecoderBudget(
+        player,
+        configuration.hwdec!,
+        visible: () => controller._views.isNotEmpty,
+      );
+      controller.platform.onPreloadedHooks.add(budget.onPreloaded);
+      controller.platform.onUnloadHooks.add(budget.onUnload);
+    }
     controller.platform.onPreloadedHooks.add(controller._onPreloaded);
 
     // Store the [VideoController] in the [_controllers].
@@ -508,6 +522,12 @@ class AndroidVideoController extends PlatformVideoController {
     wid.dispose();
     wid.removeListener(widListener);
     platform.onPreloadedHooks.remove(_onPreloaded);
+    final budget = _budget;
+    if (budget != null) {
+      platform.onPreloadedHooks.remove(budget.onPreloaded);
+      platform.onUnloadHooks.remove(budget.onUnload);
+      budget.dispose();
+    }
     await videoParamsSubscription?.cancel();
     final handle = await player.handle;
     _controllers.remove(handle);
