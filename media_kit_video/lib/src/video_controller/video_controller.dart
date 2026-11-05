@@ -9,6 +9,7 @@ import 'dart:async';
 import 'package:flutter/widgets.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/src/video_controller/android_video_controller/android_video_controller.dart';
+import 'package:media_kit_video/src/video_controller/hardware_decoder_budget.dart';
 import 'package:media_kit_video/src/video_controller/native_video_controller/native_video_controller.dart';
 import 'package:media_kit_video/src/video_controller/platform_video_controller.dart';
 import 'package:media_kit_video/src/video_controller/web_video_controller/web_video_controller.dart';
@@ -32,7 +33,7 @@ import 'package:media_kit_video/src/video_controller/web_video_controller/web_vi
 ///
 /// 1. You can limit size of the video output by specifying [VideoControllerConfiguration.width] & [VideoControllerConfiguration.height].
 ///    * A smaller width & height may yield substantial performance improvements.
-///    * By default, both [VideoControllerConfiguration.height] & [VideoControllerConfiguration.width] are `null` i.e. output is based on video's resolution.
+///    * By default, both [VideoControllerConfiguration.height] & [VideoControllerConfiguration.width] are `null` i.e. output is based on video's resolution, or on GNU/Linux & Android (& on Windows when enabled) on the size the `Video` widget shows it at (see [VideoControllerConfiguration.renderAtWidgetSize]).
 /// 2. You can reduce scale of the video output by specifying [VideoControllerConfiguration.scale].
 ///    * A smaller scale may yield substantial performance improvements. Specifying this value will cause [VideoControllerConfiguration.width] & [VideoControllerConfiguration.height] to be ignored.
 ///    * By default, [VideoControllerConfiguration.scale] is `1.0` i.e. output is based on video's resolution.
@@ -68,6 +69,30 @@ class VideoController {
   /// [Rect] of the video output, received from the native implementation.
   final ValueNotifier<Rect?> rect = ValueNotifier<Rect?>(null);
 
+  /// The most players that may decode video on hardware at once, across the app. Null (the default) sets no
+  /// limit: mpv falls back to the CPU only when the hardware refuses a decoder.
+  ///
+  /// Each file is assigned before mpv creates its decoders: within the limit it uses the configured
+  /// `hwdec`, over it the CPU (`hwdec=no`). A player that plays takes the decoder of a paused one (a hidden
+  /// one first), which goes on with its paused frame on the CPU; a player put on the CPU this way asks
+  /// again when it starts playing. The hardware may refuse a decoder within the limit, since its budget
+  /// depends on resolution & frame rate (the SM7435 runs 4 VP9 1440p60 decoders, not 6): a playing player
+  /// refused this way also takes a paused one's decoder, once per file. Android players with
+  /// `vo=mediacodec_embed` are not counted, since they can only show hardware-decoded video.
+  ///
+  /// Mobile chips allow few hardware decoders per codec (e.g. 6 for VP9 on a Snapdragon 7s Gen 2), & a
+  /// feed that preloads its neighbours can take them all; on some desktop drivers several hardware decodes
+  /// at once corrupt the display.
+  static int? get maxHardwareDecoders => HardwareDecoderBudget.max;
+
+  static set maxHardwareDecoders(int? value) {
+    assert(value == null || value >= 0);
+    HardwareDecoderBudget.max = value;
+  }
+
+  /// Views given to [setViewSize] before [platform] was up.
+  final _viewSizes = <Object, ({Size size, BoxFit fit, double? aspectRatio})>{};
+
   /// {@macro video_controller}
   VideoController(
     this.player, {
@@ -77,9 +102,10 @@ class VideoController {
     player.platform?.isVideoControllerAttached = true;
 
     () async {
-      final completer = Completer();
-      WidgetsBinding.instance.addPostFrameCallback((_) => completer.complete());
-      await completer.future;
+      // The app's first frame, not the next one: a controller made between frames (a preload, a player
+      // made from async code while nothing animates) waited until something else drew, & one made while
+      // frames are off (a hidden window) waited for good, while the player's calls wait for this setup.
+      await WidgetsBinding.instance.waitUntilFirstFrameRasterized;
 
       try {
         if (NativeVideoController.supported) {
@@ -105,6 +131,15 @@ class VideoController {
         if (platform.isCompleted) {
           // Populate [id] & [rect] [ValueNotifier]s with the values from [platform] implementation of [PlatformVideoController].
           final controller = await platform.future;
+          for (final MapEntry(key: view, value: size) in _viewSizes.entries) {
+            controller.setViewSize(
+              view,
+              size.size,
+              fit: size.fit,
+              aspectRatio: size.aspectRatio,
+            );
+          }
+          _viewSizes.clear();
           // Add listeners.
           void fn0() => id.value = controller.id.value;
           void fn1() => rect.value = controller.rect.value;
@@ -151,6 +186,28 @@ class VideoController {
   Future<void> setSize({int? width, int? height}) async {
     final instance = await platform.future;
     return instance.setSize(width: width, height: height);
+  }
+
+  /// Tells the video output the [size], in physical pixels, at which [view] shows it, & how: [fit] &
+  /// [aspectRatio] as given to the `Video` widget. Null once [view] no longer shows it.
+  ///
+  /// The `Video` widget does this by itself, for [VideoControllerConfiguration.renderAtWidgetSize]; an app
+  /// that draws [id]'s texture with its own widgets may do the same.
+  void setViewSize(
+    Object view,
+    Size? size, {
+    BoxFit fit = BoxFit.contain,
+    double? aspectRatio,
+  }) {
+    final controller = notifier.value;
+    if (controller != null) {
+      _viewSizes.remove(view);
+      controller.setViewSize(view, size, fit: fit, aspectRatio: aspectRatio);
+    } else if (size == null) {
+      _viewSizes.remove(view);
+    } else {
+      _viewSizes[view] = (size: size, fit: fit, aspectRatio: aspectRatio);
+    }
   }
 
   /// A [Future] that completes when the first video frame has been rendered.

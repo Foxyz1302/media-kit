@@ -45,6 +45,15 @@ abstract class PlatformVideoController {
   /// * “With great power comes great responsibility”
   Future<void> setSize({int? width, int? height});
 
+  /// Receives the physical [size] at which [view] shows the video output, with its [fit] & [aspectRatio],
+  /// or null once it no longer does. See [VideoController.setViewSize].
+  void setViewSize(
+    Object view,
+    Size? size, {
+    BoxFit fit = BoxFit.contain,
+    double? aspectRatio,
+  }) {}
+
   /// A [Future] that completes when the first video frame has been rendered.
   Future<void> get waitUntilFirstFrameRendered =>
       waitUntilFirstFrameRenderedCompleter.future;
@@ -115,6 +124,31 @@ class VideoControllerConfiguration {
   /// * [vo] != gpu : `false`
   final bool? androidAttachSurfaceAfterVideoParameters;
 
+  /// Whether the video output is rendered at the size the `Video` widget shows the picture at, in physical
+  /// pixels, instead of at the video's own size. mpv then scales the picture & libass draws subtitles at
+  /// the screen's resolution, rather than Flutter stretching a texture of the video's size.
+  ///
+  /// The size is applied once a resize has settled, never on every frame of a window drag. It stays within
+  /// the display's physical size & never goes below the video's own size, unless the widget shows the
+  /// video smaller than that.
+  ///
+  /// Applies on GNU/Linux, Windows & Android, when the video renders on a GPU & while no [width] & [height] are set,
+  /// here or through [VideoController.setSize]. `true` or `false` sets it; `null` leaves it to the platform.
+  ///
+  /// On Android the output is never larger than the video's own size (within the display): a 4K video in a
+  /// small view renders at the view's size. Every resize there is a new `Surface`, on which mpv re-creates
+  /// its video output & the picture stops for up to ~1 s (4K), so during a file the output only grows, by
+  /// more than a tenth, once the views have settled. A new file is sized from the views at once, or at the
+  /// display-capped size while a view is still changing size (e.g. a route transition). Applies with [vo]
+  /// `gpu`.
+  ///
+  /// Default (`null`):
+  /// * GNU/Linux : on
+  /// * Android : on
+  /// * Windows : off, since a resize there still replaces the texture (a blank frame) & waits for mpv's
+  ///   next frame
+  final bool? renderAtWidgetSize;
+
   /// {@macro video_controller_configuration}
   const VideoControllerConfiguration({
     this.vo,
@@ -124,6 +158,7 @@ class VideoControllerConfiguration {
     this.scale = 1.0,
     this.enableHardwareAcceleration = true,
     this.androidAttachSurfaceAfterVideoParameters,
+    this.renderAtWidgetSize,
   });
 
   /// Returns a copy of this class with the given fields replaced by the new values.
@@ -135,6 +170,7 @@ class VideoControllerConfiguration {
     int? height,
     bool? enableHardwareAcceleration,
     bool? androidAttachSurfaceAfterVideoParameters,
+    bool? renderAtWidgetSize,
   }) =>
       VideoControllerConfiguration(
         vo: vo ?? this.vo,
@@ -147,5 +183,6 @@ class VideoControllerConfiguration {
         androidAttachSurfaceAfterVideoParameters:
             androidAttachSurfaceAfterVideoParameters ??
                 this.androidAttachSurfaceAfterVideoParameters,
+        renderAtWidgetSize: renderAtWidgetSize ?? this.renderAtWidgetSize,
       );
 }

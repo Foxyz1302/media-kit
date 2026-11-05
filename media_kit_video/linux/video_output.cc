@@ -35,6 +35,8 @@ struct _VideoOutput {
   gpointer texture_update_callback_context;
   FlTextureRegistrar* texture_registrar;
   gboolean destroyed;
+  gboolean gpu_rendering; /* H/W rendering on a GPU, not a software rasterizer. */
+  gint has_frame; /* Set once the texture was sized for a frame of mpv's. */
 };
 
 G_DEFINE_TYPE(VideoOutput, video_output, G_TYPE_OBJECT)
@@ -130,7 +132,17 @@ static void video_output_init(VideoOutput* self) {
   self->texture_update_callback_context = NULL;
   self->texture_registrar = NULL;
   self->destroyed = FALSE;
+  self->gpu_rendering = FALSE;
+  self->has_frame = 0;
   g_mutex_init(&self->mutex);
+}
+
+// mpv's own test for a software rasterizer (is_software_gl, opengl/common.c)
+static gboolean video_output_is_software_renderer(const gchar* renderer) {
+  return renderer == NULL || g_strcmp0(renderer, "Software Rasterizer") == 0 ||
+         strstr(renderer, "llvmpipe") != NULL ||
+         strstr(renderer, "softpipe") != NULL ||
+         g_strcmp0(renderer, "Mesa X11") == 0;
 }
 
 // Since Flutter 3.38 the engine's EGL context is current on the raster thread
@@ -165,6 +177,17 @@ VideoOutput* video_output_new(FlTextureRegistrar* texture_registrar,
   mpv_set_option_string(self->handle, "video-sync", "audio");
   // Causes frame drops with `pulse` audio output. (SlotSun/dart_simple_live#42)
   // mpv_set_option_string(self->handle, "video-timing-offset", "0");
+  // Rendering does not wait for a frame's display time (Flutter's raster
+  // thread or the main thread would be held), so a frame shows when Flutter
+  // next draws, as early as mpv hands it over: 20 ms early here rather than
+  // mpv's 50 ms. A value the app set before stays; the old timing is
+  // setProperty('video-timing-offset', '0.05').
+  gchar* timing_offset =
+      mpv_get_property_string(self->handle, "video-timing-offset");
+  if (timing_offset == NULL || g_ascii_strtod(timing_offset, NULL) == 0.05) {
+    mpv_set_option_string(self->handle, "video-timing-offset", "0.02");
+  }
+  mpv_free(timing_offset);
   gboolean hardware_acceleration_supported = FALSE;
   // Why an output is drawn in S/W, said in the log
   const gchar* software_reason = "hardware acceleration is off";
@@ -275,6 +298,8 @@ VideoOutput* video_output_new(FlTextureRegistrar* texture_registrar,
                     },
                     self);
                 hardware_acceleration_supported = TRUE;
+                self->gpu_rendering =
+                    !video_output_is_software_renderer(renderer);
                 // The path, the windowing system and the OpenGL renderer
                 // (llvmpipe is Mesa's software renderer)
                 g_print(
@@ -348,11 +373,15 @@ VideoOutput* video_output_new(FlTextureRegistrar* texture_registrar,
                     if (width > 0 && height > 0) {
                       gint32 size[]{(gint32)width, (gint32)height};
                       gint32 pitch = 4 * (gint32)width;
+                      // On the main thread: no wait for the display time
+                      int block_for_target_time = 0;
                       mpv_render_param params[]{
                           {MPV_RENDER_PARAM_SW_SIZE, size},
                           {MPV_RENDER_PARAM_SW_FORMAT, (void*)"rgb0"},
                           {MPV_RENDER_PARAM_SW_STRIDE, &pitch},
                           {MPV_RENDER_PARAM_SW_POINTER, self->pixel_buffer},
+                          {MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME,
+                           &block_for_target_time},
                           {MPV_RENDER_PARAM_INVALID, (void*)0},
                       };
                       mpv_render_context_render(self->render_context, params);
@@ -403,8 +432,15 @@ void video_output_set_size(VideoOutput* self, gint64 width, gint64 height) {
 
   // H/W
   if (self->texture_gl) {
+    gboolean changed = self->width != width || self->height != height;
     self->width = width;
     self->height = height;
+    // A paused output gets no frame from mpv that would resize the texture:
+    // the frame it shows is drawn again at the new size
+    if (changed && g_atomic_int_get(&self->has_frame)) {
+      fl_texture_registrar_mark_texture_frame_available(
+          self->texture_registrar, FL_TEXTURE(self->texture_gl));
+    }
   }
   // S/W
   if (self->texture_sw) {
@@ -535,7 +571,12 @@ gint64 video_output_get_texture_id(VideoOutput* self) {
   return -1;
 }
 
+gboolean video_output_get_gpu_rendering(VideoOutput* self) {
+  return self->gpu_rendering;
+}
+
 void video_output_notify_texture_update(VideoOutput* self) {
+  g_atomic_int_set(&self->has_frame, 1);
   gint64 id = video_output_get_texture_id(self);
   gint64 width = video_output_get_width(self);
   gint64 height = video_output_get_height(self);

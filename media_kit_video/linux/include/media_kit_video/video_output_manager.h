@@ -65,6 +65,16 @@ void video_output_manager_set_size(VideoOutputManager* self,
                                    gint64 height);
 
 /**
+ * @brief Whether the |VideoOutput| of |handle| renders on a GPU, see
+ * |video_output_get_gpu_rendering|. FALSE when there is none.
+ *
+ * @param self |VideoOutputManager| reference.
+ * @param handle |mpv_handle| reference casted to gint64.
+ */
+gboolean video_output_manager_get_gpu_rendering(VideoOutputManager* self,
+                                                gint64 handle);
+
+/**
  * @brief Disposes |VideoOutput| instance for given |handle|.
  *
  * @param self |VideoOutputManager| reference.

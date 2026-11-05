@@ -99,12 +99,17 @@ static void media_kit_video_plugin_handle_method_call(
             IdleCallbackData* idle_data = (IdleCallbackData*)user_data;
             fl_method_channel_invoke_method(idle_data->channel, "VideoOutput.Resize", 
                                           idle_data->result, NULL, NULL, NULL);
+            fl_value_unref(idle_data->result);
             g_free(idle_data);
             return G_SOURCE_REMOVE;
           }, idle_data);
         },
         data);
-    FlValue* result = fl_value_new_null();
+    g_autoptr(FlValue) result = fl_value_new_map();
+    fl_value_set_string_take(
+        result, "gpu",
+        fl_value_new_bool(video_output_manager_get_gpu_rendering(
+            self->video_output_manager, handle_value)));
     response = FL_METHOD_RESPONSE(fl_method_success_response_new(result));
   } else if (g_strcmp0(method, "VideoOutputManager.SetSize") == 0) {
     FlValue* arguments = fl_method_call_get_args(method_call);

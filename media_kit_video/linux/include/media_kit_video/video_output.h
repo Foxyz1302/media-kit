@@ -106,6 +106,12 @@ gint64 video_output_get_height(VideoOutput* self);
 
 gint64 video_output_get_texture_id(VideoOutput* self);
 
+/**
+ * @brief Whether mpv renders this output through OpenGL on a GPU: FALSE in S/W
+ * and on a software rasterizer such as llvmpipe.
+ */
+gboolean video_output_get_gpu_rendering(VideoOutput* self);
+
 void video_output_notify_texture_update(VideoOutput* self);
 
 #endif  // VIDEO_OUTPUT_H_

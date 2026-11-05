@@ -468,6 +468,17 @@ class PlayerConfiguration {
   /// Default: `32` MB or `32 * 1024 * 1024` bytes.
   final int bufferSize;
 
+  /// How often [PlayerStream.position], [PlayerStream.buffer] & [PlayerStream.bufferingPercentage] emit
+  /// while they change, at most: the latest value once per interval (leading & trailing edge). A seek, the
+  /// (re)start of playback, pause, the end of the file & stop emit at once. [PlayerState.position] stays
+  /// exact, updated on every change. For a progress bar, 100–250 ms is enough (ExoPlayer's updates at most
+  /// every 200 ms); an app that animates its bar between updates can go higher.
+  ///
+  /// Native backend only.
+  ///
+  /// Default: [Duration.zero], every change mpv reports (once per video frame while playing).
+  final Duration positionUpdateInterval;
+
   /// Sets the list of allowed protocols for native backend.
   ///
   /// Default: `['file', 'tcp', 'tls', 'http', 'https', 'crypto', 'data']`.
@@ -507,6 +518,7 @@ class PlayerConfiguration {
     this.libassAndroidFontName,
     this.logLevel = MPVLogLevel.error,
     this.bufferSize = 32 * 1024 * 1024,
+    this.positionUpdateInterval = Duration.zero,
     this.protocolWhitelist = const [
       'udp',
       'rtp',
