@@ -85,45 +85,223 @@ class NativePlayer extends PlatformPlayer {
   /// {@macro native_player}
   NativePlayer({required super.configuration})
       : mpv = generated.MPV(DynamicLibrary.open(NativeLibrary.path)) {
-    future = _create()
-      ..then((_) {
-        try {
-          configuration.ready?.call();
-        } catch (_) {}
-      });
+    future = _create().then((created) {
+      if (!created) {
+        return;
+      }
+      try {
+        configuration.ready?.call();
+      } catch (_) {}
+    });
   }
 
   /// Disposes the [Player] instance & releases the resources.
+  ///
+  /// Idempotent: every call returns the same [Future]. The order:
+  /// 1. the calls made before it finish, within a bounded time; the calls made after it throw;
+  /// 2. playback stops;
+  /// 3. the [release] callbacks run: the video output frees mpv's render context there, which mpv
+  ///    requires before its handle is destroyed;
+  /// 4. the streams close;
+  /// 5. no more events: the event in flight finishes, the pending requests fail;
+  /// 6. the mpv handle is destroyed, once nothing can touch it anymore.
+  ///
+  /// [synchronized] is kept for source compatibility; dispose always waits for the call in progress.
   @override
+  // ignore: must_call_super
   Future<void> dispose({bool synchronized = true}) {
-    Future<void> function() async {
-      if (disposed) {
-        throw AssertionError('[Player] has been disposed');
-      }
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+    return _disposeFuture ??= _dispose();
+  }
 
-      await NativeReferenceHolder.instance.remove(ctx);
-      await stop(notify: false, synchronized: false);
+  Future<void>? _disposeFuture;
 
-      disposed = true;
-      _positionEmitter.cancel();
-      _bufferEmitter.cancel();
-      _bufferingPercentageEmitter.cancel();
+  /// Whether [dispose] was called: the escape hatches ([setProperty], [command], ...) don't wait in
+  /// the lock, so they throw from that moment on.
+  bool get _disposing => disposed || _disposeFuture != null;
 
-      await super.dispose();
+  Future<void> _dispose() async {
+    // The calls made before dispose run first; the ones made after it throw.
+    try {
+      await _lock.synchronized(
+        () => disposed = true,
+        timeout: _disposeStepTimeout,
+      );
+    } on TimeoutException {
+      print('media_kit: NativePlayer: dispose did not wait for the calls before it any longer.');
+    }
+    disposed = true;
 
-      Initializer(mpv).dispose(ctx);
-
-      Future.delayed(const Duration(seconds: 5), () {
-        mpv.mpv_terminate_destroy(ctx);
-      });
+    // A player whose initialization failed or never finished still disposes.
+    var initialized = true;
+    try {
+      await _ready();
+    } catch (exception) {
+      initialized = false;
+      print('media_kit: NativePlayer: dispose without initialization: $exception');
     }
 
-    if (synchronized) {
-      return lock.synchronized(function);
+    if (initialized && _alive) {
+      try {
+        await _stop(notify: false).timeout(_disposeStepTimeout);
+      } catch (exception) {
+        print('media_kit: NativePlayer: dispose: stop: $exception');
+      }
+    }
+
+    _positionEmitter.cancel();
+    _bufferEmitter.cancel();
+    _bufferingPercentageEmitter.cancel();
+
+    // The release callbacks, then the streams.
+    await super.dispose();
+
+    final ctx = this.ctx;
+    if (ctx == nullptr) {
+      return;
+    }
+
+    // No event reaches [_handler] anymore, & no native call starts from this player.
+    _detached = true;
+    final eventsStopped = _eventsStopped = Initializer(mpv).dispose(ctx);
+    var drained = true;
+    try {
+      await eventsStopped.timeout(_disposeStepTimeout);
+    } on TimeoutException {
+      drained = false;
+      print('media_kit: NativePlayer: dispose: an event handler is still running.');
+    }
+    _failPendingRequests();
+
+    if (_heldReference) {
+      _heldReference = false;
+      try {
+        await NativeReferenceHolder.instance
+            .remove(ctx)
+            .timeout(_disposeStepTimeout);
+      } catch (exception) {
+        print('media_kit: NativePlayer: dispose: $exception');
+      }
+    }
+
+    final safe = drained &&
+        !releaseCallbacksTimedOut &&
+        !releaseCallbacksPending &&
+        _nativeWork.isEmpty &&
+        (!isVideoControllerAttached || videoControllerCompleter.isCompleted);
+    if (safe) {
+      try {
+        await _destroy(ctx).timeout(_disposeStepTimeout);
+      } on TimeoutException {
+        print('media_kit: NativePlayer: dispose: mpv_terminate_destroy still runs.');
+      }
     } else {
-      return function();
+      // Something may still use the handle: a render context of a VideoController that hasn't finished
+      // initializing (it may still create one), a release callback or event handler still running, a
+      // native task in another isolate. The handle stays alive until all of them are done.
+      unawaited(_destroyWhenSafe(ctx));
+    }
+  }
+
+  Future<void> _destroyWhenSafe(Pointer<generated.mpv_handle> ctx) async {
+    print('media_kit: NativePlayer: dispose: the mpv handle is destroyed once nothing uses it.');
+    try {
+      if (isVideoControllerAttached) {
+        await videoControllerCompleter.future;
+      }
+      await Future.wait([
+        if (_eventsStopped != null) _eventsStopped!,
+        ...pendingReleaseCallbacks,
+        ..._nativeWork,
+      ]);
+      // A VideoController that finished initializing after the release callbacks ran registered its own.
+      await runReleaseCallbacks();
+      await Future.wait(pendingReleaseCallbacks);
+      await _destroy(ctx);
+    } catch (exception, stacktrace) {
+      print(exception);
+      print(stacktrace);
+    }
+  }
+
+  /// Destroys [ctx] in a worker isolate, right away. Nothing in this isolate can reach it afterwards:
+  /// [ctx] reads nullptr.
+  Future<void> _destroy(Pointer<generated.mpv_handle> ctx) async {
+    if (this.ctx != ctx) {
+      return;
+    }
+    this.ctx = nullptr;
+    await Initializer(mpv).destroy(ctx);
+  }
+
+  /// Completes the requests whose replies won't come anymore, so their callers don't wait forever.
+  void _failPendingRequests() {
+    final pending = [
+      ..._setPropertyRequests.values,
+      ..._commandRequests.values,
+    ];
+    _setPropertyRequests.clear();
+    _commandRequests.clear();
+    for (final completer in pending) {
+      if (!completer.isCompleted) {
+        completer.complete(generated.mpv_error.MPV_ERROR_UNINITIALIZED.value);
+      }
+    }
+  }
+
+  /// How long each step of [dispose] waits for something that may never finish.
+  static const Duration _disposeStepTimeout = Duration(seconds: 10);
+
+  @override
+  Duration? get releaseCallbackTimeout => _disposeStepTimeout;
+
+  /// Whether the mpv handle can be called: created, its events still delivered, not destroyed.
+  bool get _alive => ctx != nullptr && !_detached;
+
+  /// The mpv handle, for a native call made right now. Throws once [dispose] has stopped the events.
+  ///
+  /// Every native call reads it right before the call, never across an `await`: [dispose] can run
+  /// at any `await`.
+  Pointer<generated.mpv_handle> get _live {
+    if (!_alive) {
+      throw AssertionError('[Player] has been disposed');
+    }
+    return ctx;
+  }
+
+  /// Whether [dispose] stopped the events of [ctx]; set once, before the handle is destroyed.
+  bool _detached = false;
+
+  /// Completes once no event handler runs & nothing waits in mpv_wait_event on [ctx] anymore.
+  Future<void>? _eventsStopped;
+
+  /// Whether [ctx] is in [NativeReferenceHolder].
+  bool _heldReference = false;
+
+  /// Work in other isolates that uses [ctx]: [ctx] is destroyed after it's done.
+  final Set<Future<void>> _nativeWork = <Future<void>>{};
+
+  /// Runs [task] with [ctx] in another isolate. [dispose] waits for it before it destroys [ctx].
+  Future<T> _withHandleElsewhere<T>(Future<T> Function(int ctx) task) {
+    final future = task(_live.address);
+    final done = future.then<void>((_) {}, onError: (_) {});
+    _nativeWork.add(done);
+    done.whenComplete(() => _nativeWork.remove(done));
+    return future;
+  }
+
+  @override
+  set isVideoControllerAttached(bool value) {
+    super.isVideoControllerAttached = value;
+    if (value && _alive) {
+      _markRenderContext();
+    }
+  }
+
+  /// A VideoController on desktop renders through mpv's render API: its render context must be freed
+  /// before the handle is destroyed, so the handle can't be destroyed blindly if this isolate dies.
+  void _markRenderContext() {
+    if (!Platform.isAndroid) {
+      Initializer(mpv).markRenderContext(ctx);
     }
   }
 
@@ -155,8 +333,7 @@ class NativePlayer extends PlatformPlayer {
       if (disposed) {
         throw AssertionError('[Player] has been disposed');
       }
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
 
       final int index;
       final List<Media> playlist = <Media>[];
@@ -233,7 +410,7 @@ class NativePlayer extends PlatformPlayer {
     }
 
     if (synchronized) {
-      return lock.synchronized(function);
+      return _lock.synchronized(function);
     } else {
       return function();
     }
@@ -251,116 +428,120 @@ class NativePlayer extends PlatformPlayer {
       if (disposed) {
         throw AssertionError('[Player] has been disposed');
       }
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
 
-      isShuffleEnabled = false;
-      isPlayingStateChangeAllowed = false;
-      isBufferingStateChangeAllowed = false;
-      if (!open) {
-        _awaitingFile = false;
-        _pendingSeek = null;
-      }
-
-      final commands = [
-        ['stop'],
-        ['playlist-clear'],
-        ['playlist-play-index', 'none'],
-      ];
-      for (final command in commands) {
-        await _command(command);
-      }
-
-      // Reset the remaining attributes.
-      state = PlayerState().copyWith(
-        volume: state.volume,
-        rate: state.rate,
-        pitch: state.pitch,
-        playlistMode: state.playlistMode,
-        shuffle: isShuffleEnabled,
-        audioDevice: state.audioDevice,
-        audioDevices: state.audioDevices,
-      );
-      if (notify) {
-        if (!open) {
-          // Do not emit PlayerStream.playlist if invoked from [open].
-          if (!playlistController.isClosed) {
-            playlistController.add(Playlist([]));
-          }
-        }
-        if (!playingController.isClosed) {
-          playingController.add(false);
-        }
-        if (!completedController.isClosed) {
-          completedController.add(false);
-        }
-        _positionEmitter.cancel();
-        if (!positionController.isClosed) {
-          positionController.add(Duration.zero);
-        }
-        if (!durationController.isClosed) {
-          durationController.add(Duration.zero);
-        }
-        // if (!volumeController.isClosed) {
-        //   volumeController.add(0.0);
-        // }
-        // if (!rateController.isClosed) {
-        //   rateController.add(0.0);
-        // }
-        // if (!pitchController.isClosed) {
-        //   pitchController.add(0.0);
-        // }
-        if (!bufferingController.isClosed) {
-          bufferingController.add(false);
-        }
-        _bufferEmitter.cancel();
-        _bufferingPercentageEmitter.cancel();
-        if (!bufferController.isClosed) {
-          bufferController.add(Duration.zero);
-        }
-        // if (!playlistModeController.isClosed) {
-        //   playlistModeController.add(PlaylistMode.none);
-        // }
-        if (!shuffleController.isClosed) {
-          shuffleController.add(isShuffleEnabled);
-        }
-        // if (!audioParamsController.isClosed) {
-        //   audioParamsController.add(const AudioParams());
-        // }
-        if (!videoParamsController.isClosed) {
-          videoParamsController.add(const VideoParams());
-        }
-        // if (!audioBitrateController.isClosed) {
-        //   audioBitrateController.add(null);
-        // }
-        // if (!audioDeviceController.isClosed) {
-        //   audioDeviceController.add(AudioDevice.auto());
-        // }
-        // if (!audioDevicesController.isClosed) {
-        //   audioDevicesController.add([AudioDevice.auto()]);
-        // }
-        if (!trackController.isClosed) {
-          trackController.add(Track());
-        }
-        if (!tracksController.isClosed) {
-          tracksController.add(Tracks());
-        }
-        if (!widthController.isClosed) {
-          widthController.add(null);
-        }
-        if (!heightController.isClosed) {
-          heightController.add(null);
-        }
-        if (!subtitleController.isClosed) {
-          subtitleController.add(['', '']);
-        }
-      }
+      await _stop(open: open, notify: notify);
     }
 
     if (synchronized) {
-      return lock.synchronized(function);
+      return _lock.synchronized(function);
     } else {
       return function();
+    }
+  }
+
+  /// The body of [stop], for [dispose] too: it doesn't check [disposed].
+  Future<void> _stop({bool open = false, bool notify = true}) async {
+    isShuffleEnabled = false;
+    isPlayingStateChangeAllowed = false;
+    isBufferingStateChangeAllowed = false;
+    if (!open) {
+      _awaitingFile = false;
+      _pendingSeek = null;
+    }
+
+    final commands = [
+      ['stop'],
+      ['playlist-clear'],
+      ['playlist-play-index', 'none'],
+    ];
+    for (final command in commands) {
+      await _command(command);
+    }
+
+    // Reset the remaining attributes.
+    state = PlayerState().copyWith(
+      volume: state.volume,
+      rate: state.rate,
+      pitch: state.pitch,
+      playlistMode: state.playlistMode,
+      shuffle: isShuffleEnabled,
+      audioDevice: state.audioDevice,
+      audioDevices: state.audioDevices,
+    );
+    if (notify) {
+      if (!open) {
+        // Do not emit PlayerStream.playlist if invoked from [open].
+        if (!playlistController.isClosed) {
+          playlistController.add(Playlist([]));
+        }
+      }
+      if (!playingController.isClosed) {
+        playingController.add(false);
+      }
+      if (!completedController.isClosed) {
+        completedController.add(false);
+      }
+      _positionEmitter.cancel();
+      if (!positionController.isClosed) {
+        positionController.add(Duration.zero);
+      }
+      if (!durationController.isClosed) {
+        durationController.add(Duration.zero);
+      }
+      // if (!volumeController.isClosed) {
+      //   volumeController.add(0.0);
+      // }
+      // if (!rateController.isClosed) {
+      //   rateController.add(0.0);
+      // }
+      // if (!pitchController.isClosed) {
+      //   pitchController.add(0.0);
+      // }
+      if (!bufferingController.isClosed) {
+        bufferingController.add(false);
+      }
+      _bufferEmitter.cancel();
+      _bufferingPercentageEmitter.cancel();
+      if (!bufferController.isClosed) {
+        bufferController.add(Duration.zero);
+      }
+      // if (!playlistModeController.isClosed) {
+      //   playlistModeController.add(PlaylistMode.none);
+      // }
+      if (!shuffleController.isClosed) {
+        shuffleController.add(isShuffleEnabled);
+      }
+      // if (!audioParamsController.isClosed) {
+      //   audioParamsController.add(const AudioParams());
+      // }
+      if (!videoParamsController.isClosed) {
+        videoParamsController.add(const VideoParams());
+      }
+      // if (!audioBitrateController.isClosed) {
+      //   audioBitrateController.add(null);
+      // }
+      // if (!audioDeviceController.isClosed) {
+      //   audioDeviceController.add(AudioDevice.auto());
+      // }
+      // if (!audioDevicesController.isClosed) {
+      //   audioDevicesController.add([AudioDevice.auto()]);
+      // }
+      if (!trackController.isClosed) {
+        trackController.add(Track());
+      }
+      if (!tracksController.isClosed) {
+        tracksController.add(Tracks());
+      }
+      if (!widthController.isClosed) {
+        widthController.add(null);
+      }
+      if (!heightController.isClosed) {
+        heightController.add(null);
+      }
+      if (!subtitleController.isClosed) {
+        subtitleController.add(['', '']);
+      }
     }
   }
 
@@ -371,8 +552,7 @@ class NativePlayer extends PlatformPlayer {
       if (disposed) {
         throw AssertionError('[Player] has been disposed');
       }
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
 
       state = state.copyWith(playing: true);
       if (!playingController.isClosed) {
@@ -390,7 +570,7 @@ class NativePlayer extends PlatformPlayer {
     }
 
     if (synchronized) {
-      return lock.synchronized(function);
+      return _lock.synchronized(function);
     } else {
       return function();
     }
@@ -403,8 +583,7 @@ class NativePlayer extends PlatformPlayer {
       if (disposed) {
         throw AssertionError('[Player] has been disposed');
       }
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
 
       state = state.copyWith(playing: false);
       if (!playingController.isClosed) {
@@ -417,7 +596,7 @@ class NativePlayer extends PlatformPlayer {
     }
 
     if (synchronized) {
-      return lock.synchronized(function);
+      return _lock.synchronized(function);
     } else {
       return function();
     }
@@ -430,8 +609,7 @@ class NativePlayer extends PlatformPlayer {
       if (disposed) {
         throw AssertionError('[Player] has been disposed');
       }
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
 
       if (notify) {
         // Do not change the [state.playing] value if [playOrPause] was called from [play] or [pause]; where the [state.playing] value is already changed.
@@ -453,7 +631,7 @@ class NativePlayer extends PlatformPlayer {
     }
 
     if (synchronized) {
-      return lock.synchronized(function);
+      return _lock.synchronized(function);
     } else {
       return function();
     }
@@ -466,8 +644,7 @@ class NativePlayer extends PlatformPlayer {
       if (disposed) {
         throw AssertionError('[Player] has been disposed');
       }
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
 
       // External List<Media>:
       // ---------------------------------------------
@@ -484,7 +661,7 @@ class NativePlayer extends PlatformPlayer {
     }
 
     if (synchronized) {
-      return lock.synchronized(function);
+      return _lock.synchronized(function);
     } else {
       return function();
     }
@@ -497,8 +674,7 @@ class NativePlayer extends PlatformPlayer {
       if (disposed) {
         throw AssertionError('[Player] has been disposed');
       }
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
 
       int currentIndex = state.playlist.index;
 
@@ -575,7 +751,7 @@ class NativePlayer extends PlatformPlayer {
     }
 
     if (synchronized) {
-      return lock.synchronized(function);
+      return _lock.synchronized(function);
     } else {
       return function();
     }
@@ -588,8 +764,7 @@ class NativePlayer extends PlatformPlayer {
       if (disposed) {
         throw AssertionError('[Player] has been disposed');
       }
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
 
       // Do nothing if currently present at the first or last index & playlist mode is [PlaylistMode.none] or [PlaylistMode.single].
       if ([
@@ -605,7 +780,7 @@ class NativePlayer extends PlatformPlayer {
     }
 
     if (synchronized) {
-      return lock.synchronized(function);
+      return _lock.synchronized(function);
     } else {
       return function();
     }
@@ -618,8 +793,7 @@ class NativePlayer extends PlatformPlayer {
       if (disposed) {
         throw AssertionError('[Player] has been disposed');
       }
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
 
       // Do nothing if currently present at the first or last index & playlist mode is [PlaylistMode.none] or [PlaylistMode.single].
       if ([
@@ -635,7 +809,7 @@ class NativePlayer extends PlatformPlayer {
     }
 
     if (synchronized) {
-      return lock.synchronized(function);
+      return _lock.synchronized(function);
     } else {
       return function();
     }
@@ -648,15 +822,14 @@ class NativePlayer extends PlatformPlayer {
       if (disposed) {
         throw AssertionError('[Player] has been disposed');
       }
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
 
       await play(synchronized: false);
       await _setPropertyInt64('playlist-pos', index);
     }
 
     if (synchronized) {
-      return lock.synchronized(function);
+      return _lock.synchronized(function);
     } else {
       return function();
     }
@@ -669,8 +842,7 @@ class NativePlayer extends PlatformPlayer {
       if (disposed) {
         throw AssertionError('[Player] has been disposed');
       }
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
 
       // External List<Media>:
       // ---------------------------------------------
@@ -695,7 +867,7 @@ class NativePlayer extends PlatformPlayer {
     }
 
     if (synchronized) {
-      return lock.synchronized(function);
+      return _lock.synchronized(function);
     } else {
       return function();
     }
@@ -709,8 +881,7 @@ class NativePlayer extends PlatformPlayer {
         throw AssertionError('[Player] has been disposed');
       }
 
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
 
       // The position after a seek goes out at once, whatever [PlayerConfiguration.positionUpdateInterval].
       _positionEmitter.nextAtOnce();
@@ -735,7 +906,7 @@ class NativePlayer extends PlatformPlayer {
     }
 
     if (synchronized) {
-      return lock.synchronized(function);
+      return _lock.synchronized(function);
     } else {
       return function();
     }
@@ -751,8 +922,7 @@ class NativePlayer extends PlatformPlayer {
       if (disposed) {
         throw AssertionError('[Player] has been disposed');
       }
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
 
       switch (playlistMode) {
         case PlaylistMode.none:
@@ -782,7 +952,7 @@ class NativePlayer extends PlatformPlayer {
     }
 
     if (synchronized) {
-      return lock.synchronized(function);
+      return _lock.synchronized(function);
     } else {
       return function();
     }
@@ -795,14 +965,13 @@ class NativePlayer extends PlatformPlayer {
       if (disposed) {
         throw AssertionError('[Player] has been disposed');
       }
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
 
       await _setPropertyDouble('volume', volume);
     }
 
     if (synchronized) {
-      return lock.synchronized(function);
+      return _lock.synchronized(function);
     } else {
       return function();
     }
@@ -815,8 +984,7 @@ class NativePlayer extends PlatformPlayer {
       if (disposed) {
         throw AssertionError('[Player] has been disposed');
       }
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
 
       if (rate <= 0.0) {
         throw ArgumentError.value(rate, 'rate', 'Must be greater than 0.0');
@@ -850,7 +1018,7 @@ class NativePlayer extends PlatformPlayer {
     }
 
     if (synchronized) {
-      return lock.synchronized(function);
+      return _lock.synchronized(function);
     } else {
       return function();
     }
@@ -863,8 +1031,7 @@ class NativePlayer extends PlatformPlayer {
       if (disposed) {
         throw AssertionError('[Player] has been disposed');
       }
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
 
       if (configuration.pitch) {
         if (pitch <= 0.0) {
@@ -894,7 +1061,7 @@ class NativePlayer extends PlatformPlayer {
     }
 
     if (synchronized) {
-      return lock.synchronized(function);
+      return _lock.synchronized(function);
     } else {
       return function();
     }
@@ -907,8 +1074,7 @@ class NativePlayer extends PlatformPlayer {
       if (disposed) {
         throw AssertionError('[Player] has been disposed');
       }
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
 
       if (shuffle == isShuffleEnabled) {
         return;
@@ -922,9 +1088,11 @@ class NativePlayer extends PlatformPlayer {
 
       await _command([shuffle ? 'playlist-shuffle' : 'playlist-unshuffle']);
 
-      final getPlaylistResult = await compute(
-        _getPlaylist,
-        _GetPlaylistData(ctx.address, NativeLibrary.path),
+      final getPlaylistResult = await _withHandleElsewhere(
+        (ctx) => compute(
+          _getPlaylist,
+          _GetPlaylistData(ctx, NativeLibrary.path),
+        ),
       );
       final index = getPlaylistResult.index;
       final medias = getPlaylistResult.playlist.map(Media.new).toList();
@@ -943,7 +1111,7 @@ class NativePlayer extends PlatformPlayer {
     }
 
     if (synchronized) {
-      return lock.synchronized(function);
+      return _lock.synchronized(function);
     } else {
       return function();
     }
@@ -962,14 +1130,13 @@ class NativePlayer extends PlatformPlayer {
       if (disposed) {
         throw AssertionError('[Player] has been disposed');
       }
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
 
       await _setPropertyString('audio-device', audioDevice.name);
     }
 
     if (synchronized) {
-      return lock.synchronized(function);
+      return _lock.synchronized(function);
     } else {
       return function();
     }
@@ -985,8 +1152,7 @@ class NativePlayer extends PlatformPlayer {
       if (disposed) {
         throw AssertionError('[Player] has been disposed');
       }
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
 
       await _setPropertyString('vid', track.id);
       state = state.copyWith(track: state.track.copyWith(video: track));
@@ -996,7 +1162,7 @@ class NativePlayer extends PlatformPlayer {
     }
 
     if (synchronized) {
-      return lock.synchronized(function);
+      return _lock.synchronized(function);
     } else {
       return function();
     }
@@ -1024,8 +1190,7 @@ class NativePlayer extends PlatformPlayer {
       if (disposed) {
         throw AssertionError('[Player] has been disposed');
       }
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
 
       if (track.uri) {
         await _command([
@@ -1049,7 +1214,7 @@ class NativePlayer extends PlatformPlayer {
     }
 
     if (synchronized) {
-      return lock.synchronized(function);
+      return _lock.synchronized(function);
     } else {
       return function();
     }
@@ -1080,8 +1245,7 @@ class NativePlayer extends PlatformPlayer {
       if (disposed) {
         throw AssertionError('[Player] has been disposed');
       }
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
 
       // Reset existing Player.state.subtitle & Player.stream.subtitle.
       state = state.copyWith(subtitle: const PlayerState().subtitle);
@@ -1125,7 +1289,7 @@ class NativePlayer extends PlatformPlayer {
     }
 
     if (synchronized) {
-      return lock.synchronized(function);
+      return _lock.synchronized(function);
     } else {
       return function();
     }
@@ -1158,22 +1322,23 @@ class NativePlayer extends PlatformPlayer {
         throw AssertionError('[Player] has been disposed');
       }
 
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
 
-      return compute(
-        _screenshot,
-        _ScreenshotData(
-          ctx.address,
-          NativeLibrary.path,
-          format,
-          includeLibassSubtitles,
+      return _withHandleElsewhere(
+        (ctx) => compute(
+          _screenshot,
+          _ScreenshotData(
+            ctx,
+            NativeLibrary.path,
+            format,
+            includeLibassSubtitles,
+          ),
         ),
       );
     }
 
     if (synchronized) {
-      return lock.synchronized(function);
+      return _lock.synchronized(function);
     } else {
       return function();
     }
@@ -1185,7 +1350,10 @@ class NativePlayer extends PlatformPlayer {
   ///
   @override
   Future<int> get handle async {
-    await waitForPlayerInitialization;
+    await _playerReady();
+    if (ctx == nullptr) {
+      throw AssertionError('[Player] has been disposed');
+    }
     return ctx.address;
   }
 
@@ -1201,13 +1369,12 @@ class NativePlayer extends PlatformPlayer {
     String value, {
     bool waitForInitialization = true,
   }) async {
-    if (disposed) {
+    if (_disposing) {
       throw AssertionError('[Player] has been disposed');
     }
 
     if (waitForInitialization) {
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
     }
 
     // Go through the same path as [command] so that, when
@@ -1226,14 +1393,14 @@ class NativePlayer extends PlatformPlayer {
   /// Sets [property] synchronously. Use this inside [onPreloadedHooks]: mpv waits for the hook, & the
   /// asynchronous API would wait for a reply event that the blocked event loop cannot deliver.
   void setPropertySync(String property, String value) {
-    if (disposed) {
+    if (_disposing) {
       throw AssertionError('[Player] has been disposed');
     }
     final name = property.toNativeUtf8();
     final data = value.toNativeUtf8();
     try {
       _logError(
-        mpv.mpv_set_property_string(ctx, name.cast(), data.cast()),
+        mpv.mpv_set_property_string(_live, name.cast(), data.cast()),
         'setPropertySync($property, $value)',
       );
     } finally {
@@ -1253,18 +1420,17 @@ class NativePlayer extends PlatformPlayer {
     String property, {
     bool waitForInitialization = true,
   }) async {
-    if (disposed) {
+    if (_disposing) {
       throw AssertionError('[Player] has been disposed');
     }
 
     if (waitForInitialization) {
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
     }
 
     final name = property.toNativeUtf8();
     try {
-      final value = mpv.mpv_get_property_string(ctx, name.cast());
+      final value = mpv.mpv_get_property_string(_live, name.cast());
       if (value != nullptr) {
         try {
           return value.cast<Utf8>().toDartString();
@@ -1281,6 +1447,8 @@ class NativePlayer extends PlatformPlayer {
   /// Observes property for the internal libmpv instance of this [Player].
   /// Please use this method only if you know what you are doing, existing methods in [Player] implementation are suited for the most use cases.
   ///
+  /// The [listener] gets the value as a string & runs outside the event loop: it may await other calls.
+  ///
   /// See:
   /// * https://mpv.io/manual/master/#options
   /// * https://mpv.io/manual/master/#properties
@@ -1290,28 +1458,37 @@ class NativePlayer extends PlatformPlayer {
     Future<void> Function(String) listener, {
     bool waitForInitialization = true,
   }) async {
-    if (disposed) {
+    if (_disposing) {
       throw AssertionError('[Player] has been disposed');
     }
 
     if (waitForInitialization) {
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
     }
 
     if (observedProperties.containsKey(property)) {
       throw ArgumentError.value(property, 'property', 'Already observed');
     }
-    final reply = property.hashCode;
-    observedProperties[property] = listener;
+    // An id of its own: the internal observers use property.hashCode, & mpv_unobserve_property removes
+    // every observer with the id it's given. The value comes with the event, as a string.
+    final reply = _nextUserObserverId++;
     final name = property.toNativeUtf8();
-    mpv.mpv_observe_property(
-      ctx,
-      reply,
-      name.cast(),
-      generated.mpv_format.MPV_FORMAT_NONE,
-    );
-    calloc.free(name);
+    try {
+      _logError(
+        mpv.mpv_observe_property(
+          _live,
+          reply,
+          name.cast(),
+          generated.mpv_format.MPV_FORMAT_STRING,
+        ),
+        'observeProperty($property)',
+      );
+    } finally {
+      calloc.free(name);
+    }
+    observedProperties[property] = listener;
+    _userObserverIds[property] = reply;
+    _userObservers[reply] = listener;
   }
 
   /// Unobserves property for the internal libmpv instance of this [Player].
@@ -1325,25 +1502,31 @@ class NativePlayer extends PlatformPlayer {
     String property, {
     bool waitForInitialization = true,
   }) async {
-    if (disposed) {
+    if (_disposing) {
       throw AssertionError('[Player] has been disposed');
     }
 
     if (waitForInitialization) {
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
     }
 
     if (!observedProperties.containsKey(property)) {
       throw ArgumentError.value(property, 'property', 'Not observed');
     }
-    final reply = property.hashCode;
     observedProperties.remove(property);
-    mpv.mpv_unobserve_property(ctx, reply);
+    final reply = _userObserverIds.remove(property);
+    if (reply != null) {
+      _userObservers.remove(reply);
+      mpv.mpv_unobserve_property(_live, reply);
+    }
   }
 
   /// Observes event for the internal libmpv instance of this [Player].
   /// Please use this method only if you know what you are doing, existing methods in [Player] implementation are suited for the most use cases.
+  ///
+  /// The [listener] borrows the `mpv_event`, which stays valid only until the next event is read: the
+  /// event loop waits for it. So it must not wait for a reply from mpv (e.g. [setProperty], [command]):
+  /// that reply comes through the same event loop. [observeProperty] listeners have no such limit.
   ///
   /// See:
   /// * https://mpv.io/manual/master/#list-of-events
@@ -1353,13 +1536,12 @@ class NativePlayer extends PlatformPlayer {
     Future<void> Function(Pointer<generated.mpv_event>) listener, {
     bool waitForInitialization = true,
   }) async {
-    if (disposed) {
+    if (_disposing) {
       throw AssertionError('[Player] has been disposed');
     }
 
     if (waitForInitialization) {
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
     }
 
     if (observedEvents.containsKey(event)) {
@@ -1367,7 +1549,7 @@ class NativePlayer extends PlatformPlayer {
     }
     final eventId = generated.mpv_event_id.fromValue(event);
     observedEvents[event] = listener;
-    _logError(mpv.mpv_request_event(ctx, eventId, 1), 'observeEvent($event)');
+    _logError(mpv.mpv_request_event(_live, eventId, 1), 'observeEvent($event)');
   }
 
   /// Unobserves event for the internal libmpv instance of this [Player].
@@ -1380,13 +1562,12 @@ class NativePlayer extends PlatformPlayer {
     int event, {
     bool waitForInitialization = true,
   }) async {
-    if (disposed) {
+    if (_disposing) {
       throw AssertionError('[Player] has been disposed');
     }
 
     if (waitForInitialization) {
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
     }
 
     if (!observedEvents.containsKey(event)) {
@@ -1394,7 +1575,7 @@ class NativePlayer extends PlatformPlayer {
     }
     final eventId = generated.mpv_event_id.fromValue(event);
     observedEvents.remove(event);
-    _logError(mpv.mpv_request_event(ctx, eventId, 0), 'unobserveEvent($event)');
+    _logError(mpv.mpv_request_event(_live, eventId, 0), 'unobserveEvent($event)');
   }
 
   /// Invokes command for the internal libmpv instance of this [Player].
@@ -1407,19 +1588,21 @@ class NativePlayer extends PlatformPlayer {
     List<String> command, {
     bool waitForInitialization = true,
   }) async {
-    if (disposed) {
+    if (_disposing) {
       throw AssertionError('[Player] has been disposed');
     }
 
     if (waitForInitialization) {
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
     }
 
     await _command(command);
   }
 
   Future<void> _handler(Pointer<generated.mpv_event> event) async {
+    if (_detached) {
+      return;
+    }
     if (event.ref.event_id ==
         generated.mpv_event_id.MPV_EVENT_PROPERTY_CHANGE) {
       // Following properties are unrelated to the playback lifecycle. Thus, these can be accessed before initialization is complete.
@@ -1568,25 +1751,17 @@ class NativePlayer extends PlatformPlayer {
     if (event.ref.event_id ==
         generated.mpv_event_id.MPV_EVENT_PROPERTY_CHANGE) {
       final prop = event.ref.data.cast<generated.mpv_event_property>();
-      if (observedProperties.containsKey(
-        prop.ref.name.cast<Utf8>().toDartString(),
-      )) {
-        if (prop.ref.format == generated.mpv_format.MPV_FORMAT_NONE) {
-          final fn =
-              observedProperties[prop.ref.name.cast<Utf8>().toDartString()];
-          if (fn != null) {
-            final data = mpv.mpv_get_property_string(ctx, prop.ref.name);
-            if (data != nullptr) {
-              try {
-                await fn.call(data.cast<Utf8>().toDartString());
-              } catch (exception, stacktrace) {
-                print(exception);
-                print(stacktrace);
-              }
-              mpv.mpv_free(data.cast());
-            }
-          }
+      if (event.ref.reply_userdata >= _userObserverIdBase) {
+        // An [observeProperty] listener. Not awaited: it may await setProperty or command, whose replies
+        // come through this event loop.
+        final listener = _userObservers[event.ref.reply_userdata];
+        if (listener != null &&
+            prop.ref.format == generated.mpv_format.MPV_FORMAT_STRING) {
+          final value =
+              prop.ref.data.cast<Pointer<Utf8>>().value.toDartString();
+          _runDetached(() => listener(value));
         }
+        return;
       }
       if (prop.ref.name.cast<Utf8>().toDartString() == 'pause' &&
           prop.ref.format == generated.mpv_format.MPV_FORMAT_FLAG) {
@@ -1665,17 +1840,20 @@ class NativePlayer extends PlatformPlayer {
             state.playlist.index < state.playlist.medias.length) {
           final uri = state.playlist.medias[state.playlist.index].uri;
           if (FallbackBitrateHandler.supported(uri)) {
-            if (!audioBitrateCache.containsKey(Media.normalizeURI(uri))) {
-              audioBitrateCache[uri] =
-                  await FallbackBitrateHandler.calculateBitrate(uri, duration);
-            }
-            final bitrate = audioBitrateCache[uri];
-            if (bitrate != null) {
-              state = state.copyWith(audioBitrate: bitrate);
-              if (!audioBitrateController.isClosed) {
-                audioBitrateController.add(bitrate);
+            // Reads the file: off the event loop.
+            _runDetached(() async {
+              if (!audioBitrateCache.containsKey(Media.normalizeURI(uri))) {
+                audioBitrateCache[uri] = await FallbackBitrateHandler
+                    .calculateBitrate(uri, duration);
               }
-            }
+              final bitrate = audioBitrateCache[uri];
+              if (bitrate != null && !_detached) {
+                state = state.copyWith(audioBitrate: bitrate);
+                if (!audioBitrateController.isClosed) {
+                  audioBitrateController.add(bitrate);
+                }
+              }
+            });
           }
         }
       }
@@ -2159,187 +2337,229 @@ class NativePlayer extends PlatformPlayer {
     }
     if (event.ref.event_id == generated.mpv_event_id.MPV_EVENT_HOOK) {
       final prop = event.ref.data.cast<generated.mpv_event_hook>();
-      if (prop.ref.name.cast<Utf8>().toDartString() == 'on_load') {
-        // --------------------------------------------------
-        for (final hook in onLoadHooks) {
-          try {
-            await hook.call();
-          } catch (exception, stacktrace) {
-            print(exception);
-            print(stacktrace);
+      final name = prop.ref.name.cast<Utf8>().toDartString();
+      final id = prop.ref.id;
+      // Not awaited: mpv waits for mpv_hook_continue & keeps answering API calls meanwhile, whose replies
+      // come through this event loop. A hook that awaits setProperty or command would otherwise wait
+      // forever.
+      unawaited(_runHook(name, id));
+    }
+  }
+
+  /// Runs the hooks of mpv's hook [name], then lets mpv continue.
+  Future<void> _runHook(String name, int id) async {
+    try {
+      switch (name) {
+        case 'on_load':
+          await _runHooks(onLoadHooks);
+          if (_alive) {
+            _onLoad();
           }
-        }
-        // --------------------------------------------------
-        // Handle HTTP headers specified in the [Media].
-        try {
-          final name = 'path'.toNativeUtf8();
-          final uri = mpv.mpv_get_property_string(ctx, name.cast());
-          // Get the headers for current [Media] by looking up [uri] in the [HashMap].
-          final headers = Media(uri.cast<Utf8>().toDartString()).httpHeaders;
-          if (headers != null) {
-            final property = 'http-header-fields'.toNativeUtf8();
-            // Allocate & fill the [mpv_node] with the headers.
-            final value = calloc<generated.mpv_node>();
-            value.ref.format = generated.mpv_format.MPV_FORMAT_NODE_ARRAY;
-            value.ref.u.list = calloc<generated.mpv_node_list>();
-            value.ref.u.list.ref.num = headers.length;
-            value.ref.u.list.ref.values = calloc<generated.mpv_node>(
-              headers.length,
-            );
-            final entries = headers.entries.toList();
-            for (int i = 0; i < entries.length; i++) {
-              final k = entries[i].key;
-              final v = entries[i].value;
-              final data = '$k: $v'.toNativeUtf8();
-              value.ref.u.list.ref.values[i].format =
-                  generated.mpv_format.MPV_FORMAT_STRING;
-              value.ref.u.list.ref.values[i].u.string = data.cast();
-            }
-            mpv.mpv_set_property(
-              ctx,
-              property.cast(),
-              generated.mpv_format.MPV_FORMAT_NODE,
-              value.cast(),
-            );
-            // Free the allocated memory.
-            calloc.free(property);
-            for (int i = 0; i < value.ref.u.list.ref.num; i++) {
-              calloc.free(value.ref.u.list.ref.values[i].u.string);
-            }
-            calloc.free(value.ref.u.list.ref.values);
-            calloc.free(value.ref.u.list);
-            calloc.free(value);
+        case 'on_preloaded':
+          await _runHooks(onPreloadedHooks);
+        case 'on_unload':
+          await _runHooks(onUnloadHooks);
+          if (_alive) {
+            _onUnload();
           }
-          mpv.mpv_free(uri.cast());
-          calloc.free(name);
-        } catch (exception, stacktrace) {
-          print(exception);
-          print(stacktrace);
-        }
-        // Handle start & end position specified in the [Media].
-        try {
-          final name = 'playlist-pos'.toNativeUtf8();
-          final value = calloc<Int64>();
-          value.value = -1;
-
-          mpv.mpv_get_property(
-            ctx,
-            name.cast(),
-            generated.mpv_format.MPV_FORMAT_INT64,
-            value.cast(),
-          );
-
-          final index = value.value;
-
-          calloc.free(name.cast());
-          calloc.free(value.cast());
-
-          if (index >= 0) {
-            final start = current[index].start;
-            final end = current[index].end;
-
-            if (start != null) {
-              try {
-                final property = 'start'.toNativeUtf8();
-                final value = (start.inMilliseconds / 1000)
-                    .toStringAsFixed(3)
-                    .toNativeUtf8();
-                mpv.mpv_set_property_string(ctx, property.cast(), value.cast());
-                calloc.free(property);
-                calloc.free(value);
-              } catch (exception, stacktrace) {
-                print(exception);
-                print(stacktrace);
-              }
-            }
-
-            if (end != null) {
-              try {
-                final property = 'end'.toNativeUtf8();
-                final value = (end.inMilliseconds / 1000)
-                    .toStringAsFixed(3)
-                    .toNativeUtf8();
-                mpv.mpv_set_property_string(ctx, property.cast(), value.cast());
-                calloc.free(property);
-                calloc.free(value);
-              } catch (exception, stacktrace) {
-                print(exception);
-                print(stacktrace);
-              }
-            }
-          }
-        } catch (_) {}
-        // --------------------------------------------------
-        mpv.mpv_hook_continue(ctx, prop.ref.id);
       }
-      if (prop.ref.name.cast<Utf8>().toDartString() == 'on_preloaded') {
-        for (final hook in onPreloadedHooks) {
-          try {
-            await hook.call();
-          } catch (exception, stacktrace) {
-            print(exception);
-            print(stacktrace);
-          }
-        }
-        mpv.mpv_hook_continue(ctx, prop.ref.id);
-      }
-      if (prop.ref.name.cast<Utf8>().toDartString() == 'on_unload') {
-        // --------------------------------------------------
-        for (final hook in onUnloadHooks) {
-          try {
-            await hook.call();
-          } catch (exception, stacktrace) {
-            print(exception);
-            print(stacktrace);
-          }
-        }
-        // --------------------------------------------------
-        // Set http-header-fields as [generated.mpv_format.MPV_FORMAT_NONE] [generated.mpv_node].
-        try {
-          final property = 'http-header-fields'.toNativeUtf8();
-          final value = calloc<generated.mpv_node>();
-          value.ref.format = generated.mpv_format.MPV_FORMAT_NONE;
-          mpv.mpv_set_property(
-            ctx,
-            property.cast(),
-            generated.mpv_format.MPV_FORMAT_NODE,
-            value.cast(),
-          );
-          calloc.free(property);
-          calloc.free(value);
-        } catch (exception, stacktrace) {
-          print(exception);
-          print(stacktrace);
-        }
-        // Set start & end position as [generated.mpv_format.MPV_FORMAT_NONE] [generated.mpv_node].
-        try {
-          final property = 'start'.toNativeUtf8();
-          final value = 'none'.toNativeUtf8();
-          mpv.mpv_set_property_string(ctx, property.cast(), value.cast());
-          calloc.free(property);
-          calloc.free(value);
-        } catch (exception, stacktrace) {
-          print(exception);
-          print(stacktrace);
-        }
-        try {
-          final property = 'end'.toNativeUtf8();
-          final value = 'none'.toNativeUtf8();
-          mpv.mpv_set_property_string(ctx, property.cast(), value.cast());
-          calloc.free(property);
-          calloc.free(value);
-        } catch (exception, stacktrace) {
-          print(exception);
-          print(stacktrace);
-        }
-        // --------------------------------------------------
-        mpv.mpv_hook_continue(ctx, prop.ref.id);
+    } catch (exception, stacktrace) {
+      print(exception);
+      print(stacktrace);
+    } finally {
+      if (_alive) {
+        mpv.mpv_hook_continue(_live, id);
       }
     }
   }
 
-  Future<void> _create() {
-    return lock.synchronized(() async {
+  Future<void> _runHooks(List<Future<void> Function()> hooks) async {
+    for (final hook in [...hooks]) {
+      try {
+        await hook.call();
+      } catch (exception, stacktrace) {
+        print(exception);
+        print(stacktrace);
+      }
+    }
+  }
+
+  /// `on_load`: the HTTP headers, start & end of the [Media] being loaded.
+  void _onLoad() {
+    // Handle HTTP headers specified in the [Media].
+    try {
+      final name = 'path'.toNativeUtf8();
+      final uri = mpv.mpv_get_property_string(_live, name.cast());
+      // Get the headers for current [Media] by looking up [uri] in the [HashMap].
+      final headers = Media(uri.cast<Utf8>().toDartString()).httpHeaders;
+      if (headers != null) {
+        final property = 'http-header-fields'.toNativeUtf8();
+        // Allocate & fill the [mpv_node] with the headers.
+        final value = calloc<generated.mpv_node>();
+        value.ref.format = generated.mpv_format.MPV_FORMAT_NODE_ARRAY;
+        value.ref.u.list = calloc<generated.mpv_node_list>();
+        value.ref.u.list.ref.num = headers.length;
+        value.ref.u.list.ref.values = calloc<generated.mpv_node>(
+          headers.length,
+        );
+        final entries = headers.entries.toList();
+        for (int i = 0; i < entries.length; i++) {
+          final k = entries[i].key;
+          final v = entries[i].value;
+          final data = '$k: $v'.toNativeUtf8();
+          value.ref.u.list.ref.values[i].format =
+              generated.mpv_format.MPV_FORMAT_STRING;
+          value.ref.u.list.ref.values[i].u.string = data.cast();
+        }
+        mpv.mpv_set_property(
+          _live,
+          property.cast(),
+          generated.mpv_format.MPV_FORMAT_NODE,
+          value.cast(),
+        );
+        // Free the allocated memory.
+        calloc.free(property);
+        for (int i = 0; i < value.ref.u.list.ref.num; i++) {
+          calloc.free(value.ref.u.list.ref.values[i].u.string);
+        }
+        calloc.free(value.ref.u.list.ref.values);
+        calloc.free(value.ref.u.list);
+        calloc.free(value);
+      }
+      mpv.mpv_free(uri.cast());
+      calloc.free(name);
+    } catch (exception, stacktrace) {
+      print(exception);
+      print(stacktrace);
+    }
+    // Handle start & end position specified in the [Media].
+    try {
+      final name = 'playlist-pos'.toNativeUtf8();
+      final value = calloc<Int64>();
+      value.value = -1;
+
+      mpv.mpv_get_property(
+        _live,
+        name.cast(),
+        generated.mpv_format.MPV_FORMAT_INT64,
+        value.cast(),
+      );
+
+      final index = value.value;
+
+      calloc.free(name.cast());
+      calloc.free(value.cast());
+
+      if (index >= 0) {
+        final start = current[index].start;
+        final end = current[index].end;
+
+        if (start != null) {
+          try {
+            final property = 'start'.toNativeUtf8();
+            final value = (start.inMilliseconds / 1000)
+                .toStringAsFixed(3)
+                .toNativeUtf8();
+            mpv.mpv_set_property_string(_live, property.cast(), value.cast());
+            calloc.free(property);
+            calloc.free(value);
+          } catch (exception, stacktrace) {
+            print(exception);
+            print(stacktrace);
+          }
+        }
+
+        if (end != null) {
+          try {
+            final property = 'end'.toNativeUtf8();
+            final value = (end.inMilliseconds / 1000)
+                .toStringAsFixed(3)
+                .toNativeUtf8();
+            mpv.mpv_set_property_string(_live, property.cast(), value.cast());
+            calloc.free(property);
+            calloc.free(value);
+          } catch (exception, stacktrace) {
+            print(exception);
+            print(stacktrace);
+          }
+        }
+      }
+    } catch (_) {}
+  }
+
+  /// `on_unload`: resets what [_onLoad] set.
+  void _onUnload() {
+    // Set http-header-fields as [generated.mpv_format.MPV_FORMAT_NONE] [generated.mpv_node].
+    try {
+      final property = 'http-header-fields'.toNativeUtf8();
+      final value = calloc<generated.mpv_node>();
+      value.ref.format = generated.mpv_format.MPV_FORMAT_NONE;
+      mpv.mpv_set_property(
+        _live,
+        property.cast(),
+        generated.mpv_format.MPV_FORMAT_NODE,
+        value.cast(),
+      );
+      calloc.free(property);
+      calloc.free(value);
+    } catch (exception, stacktrace) {
+      print(exception);
+      print(stacktrace);
+    }
+    // Set start & end position as [generated.mpv_format.MPV_FORMAT_NONE] [generated.mpv_node].
+    try {
+      final property = 'start'.toNativeUtf8();
+      final value = 'none'.toNativeUtf8();
+      mpv.mpv_set_property_string(_live, property.cast(), value.cast());
+      calloc.free(property);
+      calloc.free(value);
+    } catch (exception, stacktrace) {
+      print(exception);
+      print(stacktrace);
+    }
+    try {
+      final property = 'end'.toNativeUtf8();
+      final value = 'none'.toNativeUtf8();
+      mpv.mpv_set_property_string(_live, property.cast(), value.cast());
+      calloc.free(property);
+      calloc.free(value);
+    } catch (exception, stacktrace) {
+      print(exception);
+      print(stacktrace);
+    }
+  }
+
+  /// Runs [listener] outside the event loop, logging what it throws.
+  void _runDetached(Future<void> Function() listener) {
+    unawaited(
+      Future<void>.sync(listener).catchError(
+        (Object exception, StackTrace stacktrace) {
+          print(exception);
+          print(stacktrace);
+        },
+      ),
+    );
+  }
+
+  /// Creates & configures the mpv handle. A failure completes [completer] with the error, so the
+  /// calls waiting for initialization throw instead of waiting forever. Returns whether it succeeded.
+  Future<bool> _create() async {
+    try {
+      await _createHandle();
+      return true;
+    } catch (exception, stacktrace) {
+      print(exception);
+      print(stacktrace);
+      if (!completer.isCompleted) {
+        completer.future.ignore();
+        completer.completeError(exception, stacktrace);
+      }
+      return false;
+    }
+  }
+
+  Future<void> _createHandle() {
+    return _lock.synchronized(() async {
       // The options which must be set before [MPV.mpv_initialize].
       final options = <String, String>{
         // Set --vid=no by default to prevent redundant video decoding.
@@ -2379,6 +2599,9 @@ class NativePlayer extends PlatformPlayer {
       }
 
       ctx = await Initializer(mpv).create(_handler, options: options);
+      if (ctx == nullptr) {
+        throw StateError('mpv_create failed');
+      }
 
       // ALL:
       //
@@ -2506,7 +2729,7 @@ class NativePlayer extends PlatformPlayer {
       }.forEach((property, format) {
         final reply = property.hashCode;
         final name = property.toNativeUtf8();
-        mpv.mpv_observe_property(ctx, reply, name.cast(), format);
+        mpv.mpv_observe_property(_live, reply, name.cast(), format);
         calloc.free(name);
       });
 
@@ -2522,23 +2745,29 @@ class NativePlayer extends PlatformPlayer {
       final level = levels[configuration.logLevel];
       if (level != null) {
         final min = level.toNativeUtf8();
-        mpv.mpv_request_log_messages(ctx, min.cast());
+        mpv.mpv_request_log_messages(_live, min.cast());
         calloc.free(min);
       }
 
       // Add libmpv hooks for supporting custom HTTP headers in [Media].
       final load = 'on_load'.toNativeUtf8();
       final unload = 'on_unload'.toNativeUtf8();
-      mpv.mpv_hook_add(ctx, 0, load.cast(), 0);
-      mpv.mpv_hook_add(ctx, 0, unload.cast(), 0);
+      mpv.mpv_hook_add(_live, 0, load.cast(), 0);
+      mpv.mpv_hook_add(_live, 0, unload.cast(), 0);
       calloc.free(load);
       calloc.free(unload);
       // [onPreloadedHooks]: e.g. attaching a video output before the decoders are created.
       final preloaded = 'on_preloaded'.toNativeUtf8();
-      mpv.mpv_hook_add(ctx, 0, preloaded.cast(), 0);
+      mpv.mpv_hook_add(_live, 0, preloaded.cast(), 0);
       calloc.free(preloaded);
 
-      await NativeReferenceHolder.instance.add(ctx);
+      if (Initializer(mpv).usesIsolate) {
+        // Hot-restart cleanup: the handles of the isolate based event loop survive the isolate.
+        await NativeReferenceHolder.instance.add(ctx);
+        _heldReference = true;
+      } else if (isVideoControllerAttached) {
+        _markRenderContext();
+      }
     });
   }
 
@@ -2572,7 +2801,7 @@ class NativePlayer extends PlatformPlayer {
         final completer =
             _setPropertyRequests[requestNumber] = Completer<int>();
         final immediate = mpv.mpv_set_property_async(
-          ctx,
+          _live,
           requestNumber,
           namePtr.cast(),
           format,
@@ -2587,7 +2816,7 @@ class NativePlayer extends PlatformPlayer {
         }
         _logError(await completer.future, text);
       } else {
-        mpv.mpv_set_property(ctx, namePtr.cast(), format, data);
+        mpv.mpv_set_property(_live, namePtr.cast(), format, data);
       }
     } finally {
       calloc.free(namePtr);
@@ -2638,7 +2867,7 @@ class NativePlayer extends PlatformPlayer {
   bool _hasOption(String name) {
     final property = 'option-info/$name/name'.toNativeUtf8();
     try {
-      final value = mpv.mpv_get_property_string(ctx, property.cast());
+      final value = mpv.mpv_get_property_string(_live, property.cast());
       if (value == nullptr) {
         return false;
       }
@@ -2674,7 +2903,7 @@ class NativePlayer extends PlatformPlayer {
       if (configuration.async) {
         final requestNumber = _asyncRequestNumber++;
         final completer = _commandRequests[requestNumber] = Completer<int>();
-        final immediate = mpv.mpv_command_async(ctx, requestNumber, arr.cast());
+        final immediate = mpv.mpv_command_async(_live, requestNumber, arr.cast());
         final text = '_command(${args.join(', ')})';
         if (immediate < 0) {
           // Sending failed, so no reply event will remove this request.
@@ -2684,7 +2913,7 @@ class NativePlayer extends PlatformPlayer {
         }
         _logError(await completer.future, text);
       } else {
-        mpv.mpv_command(ctx, arr.cast());
+        mpv.mpv_command(_live, arr.cast());
       }
     } finally {
       calloc.free(arr);
@@ -2763,8 +2992,8 @@ class NativePlayer extends PlatformPlayer {
   }
 
   /// Hooks run inside mpv's `on_preloaded` hook: the demuxer is open & `track-list` is known, but no
-  /// decoders exist yet. mpv waits for them & this player's event loop is blocked meanwhile, so they
-  /// must only make synchronous mpv calls (see [setPropertySync]).
+  /// decoders exist yet. mpv waits for them before it creates the decoders, so a property they set
+  /// synchronously (see [setPropertySync]) applies to this file's decoders.
   final List<Future<void> Function()> onPreloadedHooks = [];
 
   /// A flag to prevent changes to [state.playing] due to `loadfile` commands in [open].
@@ -2792,6 +3021,17 @@ class NativePlayer extends PlatformPlayer {
   /// Current loaded [Media] queue.
   List<Media> current = <Media>[];
 
+  /// The ids of the [observeProperty] observers start here, far above the internal observers' ids
+  /// (`String.hashCode`).
+  static const int _userObserverIdBase = 1 << 40;
+
+  int _nextUserObserverId = _userObserverIdBase;
+
+  /// The [observeProperty] observers: property → id, & id → listener.
+  final HashMap<String, int> _userObserverIds = HashMap<String, int>();
+  final HashMap<int, Future<void> Function(String)> _userObservers =
+      HashMap<int, Future<void> Function(String)>();
+
   /// Currently observed properties through [observeProperty].
   final HashMap<String, Future<void> Function(String)> observedProperties =
       HashMap<String, Future<void> Function(String)>();
@@ -2807,8 +3047,55 @@ class NativePlayer extends PlatformPlayer {
   /// The methods which must execute synchronously before playback of a source can end.
   final List<Future<void> Function()> onUnloadHooks = [];
 
-  /// Synchronization & mutual exclusion between methods of this class.
+  /// Unused: every [NativePlayer] serializes its own methods through its own lock, so one player that
+  /// waits (an open, a dispose, a VideoController that never finishes) no longer blocks the others.
+  @Deprecated('Each NativePlayer has its own lock; this one is not used anymore.')
   static final Lock lock = Lock();
+
+  /// Synchronization & mutual exclusion between the methods of this instance.
+  final Lock _lock = Lock();
+
+  /// How long a call waits for the player's own initialization before it throws.
+  static const Duration _playerInitTimeout = Duration(seconds: 20);
+
+  /// How long the calls wait for an attached [VideoController]'s initialization. Past it they go on
+  /// without it: the controller sets its properties itself once it's up.
+  static const Duration _videoControllerInitTimeout = Duration(seconds: 10);
+
+  /// The bounded wait for the attached VideoController, shared by every call once it started.
+  Future<void>? _videoControllerWait;
+
+  /// Waits for the player's initialization, bounded by [_playerInitTimeout].
+  Future<void> _playerReady() {
+    return waitForPlayerInitialization.timeout(
+      _playerInitTimeout,
+      onTimeout: () => throw TimeoutException(
+        '[Player] initialization did not finish',
+        _playerInitTimeout,
+      ),
+    );
+  }
+
+  /// Waits for an attached VideoController's initialization, bounded by [_videoControllerInitTimeout].
+  Future<void> _videoControllerReady() {
+    if (!isVideoControllerAttached || videoControllerCompleter.isCompleted) {
+      return Future<void>.value();
+    }
+    return _videoControllerWait ??= videoControllerCompleter.future.timeout(
+      _videoControllerInitTimeout,
+      onTimeout: () {
+        print(
+          'media_kit: NativePlayer: VideoController initialization did not finish within $_videoControllerInitTimeout; continuing without it.',
+        );
+      },
+    );
+  }
+
+  /// Waits for the player's & the attached VideoController's initialization; both waits are bounded.
+  Future<void> _ready() async {
+    await _playerReady();
+    await _videoControllerReady();
+  }
 
   /// [HashMap] for retrieving previously fetched audio-bitrate(s).
   static final HashMap<String, double> audioBitrateCache =

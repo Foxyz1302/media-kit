@@ -35,5 +35,5 @@ void main() {
       reason:
           'the players of the killed isolates are still running: mpv outlives its owner. Threads: ${survived.single['threadNames']}',
     );
-  }, tags: 'known-failing', timeout: const Timeout(Duration(minutes: 3)));
+  }, timeout: const Timeout(Duration(minutes: 3)));
 }

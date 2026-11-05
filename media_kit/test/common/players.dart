@@ -54,10 +54,9 @@ Future<void> releasePlayer(
 }
 
 Future<void> _neutralise(Player player) async {
-  final handle = await player.handle.timeout(
-    const Duration(seconds: 1),
-    onTimeout: () => 0,
-  );
+  final handle = await player.handle
+      .timeout(const Duration(seconds: 1), onTimeout: () => 0)
+      .catchError((_) => 0);
   if (handle == 0) {
     return;
   }

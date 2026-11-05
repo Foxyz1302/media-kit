@@ -115,5 +115,5 @@ void main() {
       lessThanOrEqualTo(1000),
       reason: 'mpv_terminate_destroy runs 5 s after dispose (L-6, P1-C3)',
     );
-  }, tags: 'known-failing', timeout: const Timeout(Duration(minutes: 2)));
+  }, timeout: const Timeout(Duration(minutes: 2)));
 }
