@@ -65,6 +65,9 @@ class AndroidVideoController extends PlatformVideoController {
   /// Fits the Surface to [_views] once their sizes have settled.
   Timer? _settle;
 
+  /// Time since a view showing this output last changed its size (not since one was added).
+  final _sinceViewResize = Stopwatch();
+
   /// Whether the Surface follows [_views] (per [VideoControllerConfiguration.renderAtWidgetSize], on by
   /// default): only when mpv renders into it. A decoder writing into it directly (`mediacodec_embed`)
   /// picks its own buffer size.
@@ -139,9 +142,12 @@ class AndroidVideoController extends PlatformVideoController {
   }
 
   /// The Surface size for a [width] x [height] video: [surfaceSizeFor], or the size the views show it at.
+  /// [surfaceSizeFor] while a view is still changing size (e.g. a route transition): the Surface can't
+  /// follow it without a new video output, & a Surface sized from a passing frame of the animation would
+  /// soon be resized anyway.
   ({int width, int height}) _surfaceSizeFor(int width, int height) {
     final cap = surfaceSizeFor(width, height);
-    if (!_followsViews) {
+    if (!_followsViews || _viewsMoving) {
       return cap;
     }
     return viewSurfaceSizeFor(
@@ -165,6 +171,12 @@ class AndroidVideoController extends PlatformVideoController {
     if (size == null || size.isEmpty || !size.isFinite) {
       _views.remove(view);
     } else {
+      final previous = _views[view];
+      if (previous != null && previous.size != size) {
+        _sinceViewResize
+          ..reset()
+          ..start();
+      }
       _views[view] = (size: size, fit: fit, aspectRatio: aspectRatio);
       _lastViews = _views.values.toList();
     }
@@ -175,9 +187,13 @@ class AndroidVideoController extends PlatformVideoController {
     _settle = Timer(settleDelay, _followViews);
   }
 
-  /// Resizes the Surface to the size [_views] show the video at, once they have settled. Only for a change
-  /// of more than a tenth of the longer side, & never while no view is left: each resize is a new Surface &
-  /// a new video output in mpv.
+  bool get _viewsMoving => _sinceViewResize.isRunning && _sinceViewResize.elapsed < settleDelay;
+
+  /// Grows the Surface to the size [_views] show the video at, once they have settled. Only for a growth
+  /// of more than a tenth of the longer side, & never while no view is left. Each resize is a new Surface &
+  /// a new video output in mpv, whose refresh seek decodes from the previous keyframe: the picture stops
+  /// for up to ~1 s on a 4K file. So the Surface never shrinks during a file (a smaller view shows the
+  /// larger Surface scaled down); the next file is sized for the views.
   Future<void> _followViews() => lock.synchronized(() async {
         if (_disposed || !_followsViews || _views.isEmpty) {
           return;
@@ -197,7 +213,7 @@ class AndroidVideoController extends PlatformVideoController {
         final surface = _surfaceSizeFor(width, height);
         final now = math.max(current.width, current.height);
         final next = math.max(surface.width, surface.height);
-        if ((next - now).abs() <= now / 10) {
+        if (next - now <= now / 10) {
           return;
         }
         final handle = await player.handle;

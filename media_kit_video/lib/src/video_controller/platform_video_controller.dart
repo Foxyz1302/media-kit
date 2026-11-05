@@ -137,8 +137,10 @@ class VideoControllerConfiguration {
   ///
   /// On Android the output is never larger than the video's own size (within the display): a 4K video in a
   /// small view renders at the view's size. Every resize there is a new `Surface`, on which mpv re-creates
-  /// its video output, so a settled size is applied only when it differs by more than a tenth; a new file
-  /// is sized from the views at once. Applies with [vo] `gpu`.
+  /// its video output & the picture stops for up to ~1 s (4K), so during a file the output only grows, by
+  /// more than a tenth, once the views have settled. A new file is sized from the views at once, or at the
+  /// display-capped size while a view is still changing size (e.g. a route transition). Applies with [vo]
+  /// `gpu`.
   ///
   /// Default (`null`):
   /// * GNU/Linux : on
