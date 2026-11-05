@@ -2439,6 +2439,7 @@ class NativePlayer extends PlatformPlayer {
       final audioClientName = _audioClientName;
       properties.addAll({
         if (audioClientName != null) 'audio-client-name': audioClientName,
+        if (_tlsVerify case final tlsVerify?) 'tls-verify': tlsVerify ? 'yes' : 'no',
         if (!configuration.osc) ...{
           // libmpv builds without Lua (e.g. Android) have no osc option; setting it there only logs
           // "property not found".
@@ -2628,6 +2629,10 @@ class NativePlayer extends PlatformPlayer {
     final name = basenameWithoutExtension(Platform.resolvedExecutable);
     return name.isEmpty ? null : name;
   }
+
+  /// The --tls-verify to set, or null to keep mpv's default. See [PlayerConfiguration.tlsVerify].
+  bool? get _tlsVerify =>
+      configuration.tlsVerify ?? (Platform.isWindows ? false : null);
 
   /// Whether the libmpv build has the option [name]; some options only exist in certain builds.
   bool _hasOption(String name) {
