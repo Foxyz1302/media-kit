@@ -177,6 +177,17 @@ VideoOutput* video_output_new(FlTextureRegistrar* texture_registrar,
   mpv_set_option_string(self->handle, "video-sync", "audio");
   // Causes frame drops with `pulse` audio output. (SlotSun/dart_simple_live#42)
   // mpv_set_option_string(self->handle, "video-timing-offset", "0");
+  // Rendering does not wait for a frame's display time (Flutter's raster
+  // thread or the main thread would be held), so a frame shows when Flutter
+  // next draws, as early as mpv hands it over: 20 ms early here rather than
+  // mpv's 50 ms. A value the app set before stays; the old timing is
+  // setProperty('video-timing-offset', '0.05').
+  gchar* timing_offset =
+      mpv_get_property_string(self->handle, "video-timing-offset");
+  if (timing_offset == NULL || g_ascii_strtod(timing_offset, NULL) == 0.05) {
+    mpv_set_option_string(self->handle, "video-timing-offset", "0.02");
+  }
+  mpv_free(timing_offset);
   gboolean hardware_acceleration_supported = FALSE;
   // Why an output is drawn in S/W, said in the log
   const gchar* software_reason = "hardware acceleration is off";
@@ -362,11 +373,15 @@ VideoOutput* video_output_new(FlTextureRegistrar* texture_registrar,
                     if (width > 0 && height > 0) {
                       gint32 size[]{(gint32)width, (gint32)height};
                       gint32 pitch = 4 * (gint32)width;
+                      // On the main thread: no wait for the display time
+                      int block_for_target_time = 0;
                       mpv_render_param params[]{
                           {MPV_RENDER_PARAM_SW_SIZE, size},
                           {MPV_RENDER_PARAM_SW_FORMAT, (void*)"rgb0"},
                           {MPV_RENDER_PARAM_SW_STRIDE, &pitch},
                           {MPV_RENDER_PARAM_SW_POINTER, self->pixel_buffer},
+                          {MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME,
+                           &block_for_target_time},
                           {MPV_RENDER_PARAM_INVALID, (void*)0},
                       };
                       mpv_render_context_render(self->render_context, params);
