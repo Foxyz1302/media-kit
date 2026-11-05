@@ -468,6 +468,54 @@ void main() {
         reason:
             'unobserveProperty removed the internal time-pos observer: both use reply_userdata = name.hashCode (E-8, P1-C4)',
       );
-    }, tags: 'known-failing');
+    });
+    test('lifecycle-observe-property-listener-awaits-calls', () async {
+      final player = await createPlayer();
+      final native = player.platform as NativePlayer;
+      await openAndPlay(player, TestMedia.h264);
+      final done = Completer<void>();
+      final values = <String>[];
+      await native.observeProperty('pause', (value) async {
+        values.add(value);
+        if (value == 'yes' && !done.isCompleted) {
+          // Their replies come through the event loop that delivered this change.
+          await native.setProperty('speed', '1.5');
+          await native.command(['seek', '1', 'absolute']);
+          done.complete();
+        }
+      });
+      await player.pause();
+      await done.future.timeout(
+        const Duration(seconds: 5),
+        onTimeout: () => fail(
+          'a listener that awaits setProperty/command deadlocked the event loop',
+        ),
+      );
+      expect(await native.getProperty('speed'), startsWith('1.5'));
+      final positions = collect(
+        player.stream.position,
+        const Duration(seconds: 1),
+      );
+      await player.play();
+      expect(await positions, isNotEmpty, reason: 'events stopped');
+      expect(values, contains('yes'));
+    });
+    test('lifecycle-hook-awaits-calls', () async {
+      final player = await createPlayer();
+      final native = player.platform as NativePlayer;
+      var hooks = 0;
+      native.onLoadHooks.add(() async {
+        await native.setProperty('speed', '1.25');
+        await native.command(['show-text', 'loading']);
+        hooks++;
+      });
+      await openAndPlay(player, TestMedia.h264).timeout(
+        const Duration(seconds: 10),
+        onTimeout: () =>
+            fail('an on_load hook that awaits calls deadlocked the event loop'),
+      );
+      expect(hooks, 1);
+      expect(await native.getProperty('speed'), startsWith('1.25'));
+    });
   });
 }

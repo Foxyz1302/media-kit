@@ -1443,6 +1443,8 @@ class NativePlayer extends PlatformPlayer {
   /// Observes property for the internal libmpv instance of this [Player].
   /// Please use this method only if you know what you are doing, existing methods in [Player] implementation are suited for the most use cases.
   ///
+  /// The [listener] gets the value as a string & runs outside the event loop: it may await other calls.
+  ///
   /// See:
   /// * https://mpv.io/manual/master/#options
   /// * https://mpv.io/manual/master/#properties
@@ -1463,16 +1465,26 @@ class NativePlayer extends PlatformPlayer {
     if (observedProperties.containsKey(property)) {
       throw ArgumentError.value(property, 'property', 'Already observed');
     }
-    final reply = property.hashCode;
-    observedProperties[property] = listener;
+    // An id of its own: the internal observers use property.hashCode, & mpv_unobserve_property removes
+    // every observer with the id it's given. The value comes with the event, as a string.
+    final reply = _nextUserObserverId++;
     final name = property.toNativeUtf8();
-    mpv.mpv_observe_property(
-      _live,
-      reply,
-      name.cast(),
-      generated.mpv_format.MPV_FORMAT_NONE,
-    );
-    calloc.free(name);
+    try {
+      _logError(
+        mpv.mpv_observe_property(
+          _live,
+          reply,
+          name.cast(),
+          generated.mpv_format.MPV_FORMAT_STRING,
+        ),
+        'observeProperty($property)',
+      );
+    } finally {
+      calloc.free(name);
+    }
+    observedProperties[property] = listener;
+    _userObserverIds[property] = reply;
+    _userObservers[reply] = listener;
   }
 
   /// Unobserves property for the internal libmpv instance of this [Player].
@@ -1497,13 +1509,20 @@ class NativePlayer extends PlatformPlayer {
     if (!observedProperties.containsKey(property)) {
       throw ArgumentError.value(property, 'property', 'Not observed');
     }
-    final reply = property.hashCode;
     observedProperties.remove(property);
-    mpv.mpv_unobserve_property(_live, reply);
+    final reply = _userObserverIds.remove(property);
+    if (reply != null) {
+      _userObservers.remove(reply);
+      mpv.mpv_unobserve_property(_live, reply);
+    }
   }
 
   /// Observes event for the internal libmpv instance of this [Player].
   /// Please use this method only if you know what you are doing, existing methods in [Player] implementation are suited for the most use cases.
+  ///
+  /// The [listener] borrows the `mpv_event`, which stays valid only until the next event is read: the
+  /// event loop waits for it. So it must not wait for a reply from mpv (e.g. [setProperty], [command]):
+  /// that reply comes through the same event loop. [observeProperty] listeners have no such limit.
   ///
   /// See:
   /// * https://mpv.io/manual/master/#list-of-events
@@ -1728,25 +1747,17 @@ class NativePlayer extends PlatformPlayer {
     if (event.ref.event_id ==
         generated.mpv_event_id.MPV_EVENT_PROPERTY_CHANGE) {
       final prop = event.ref.data.cast<generated.mpv_event_property>();
-      if (observedProperties.containsKey(
-        prop.ref.name.cast<Utf8>().toDartString(),
-      )) {
-        if (prop.ref.format == generated.mpv_format.MPV_FORMAT_NONE) {
-          final fn =
-              observedProperties[prop.ref.name.cast<Utf8>().toDartString()];
-          if (fn != null) {
-            final data = mpv.mpv_get_property_string(_live, prop.ref.name);
-            if (data != nullptr) {
-              try {
-                await fn.call(data.cast<Utf8>().toDartString());
-              } catch (exception, stacktrace) {
-                print(exception);
-                print(stacktrace);
-              }
-              mpv.mpv_free(data.cast());
-            }
-          }
+      if (event.ref.reply_userdata >= _userObserverIdBase) {
+        // An [observeProperty] listener. Not awaited: it may await setProperty or command, whose replies
+        // come through this event loop.
+        final listener = _userObservers[event.ref.reply_userdata];
+        if (listener != null &&
+            prop.ref.format == generated.mpv_format.MPV_FORMAT_STRING) {
+          final value =
+              prop.ref.data.cast<Pointer<Utf8>>().value.toDartString();
+          _runDetached(() => listener(value));
         }
+        return;
       }
       if (prop.ref.name.cast<Utf8>().toDartString() == 'pause' &&
           prop.ref.format == generated.mpv_format.MPV_FORMAT_FLAG) {
@@ -1825,17 +1836,20 @@ class NativePlayer extends PlatformPlayer {
             state.playlist.index < state.playlist.medias.length) {
           final uri = state.playlist.medias[state.playlist.index].uri;
           if (FallbackBitrateHandler.supported(uri)) {
-            if (!audioBitrateCache.containsKey(Media.normalizeURI(uri))) {
-              audioBitrateCache[uri] =
-                  await FallbackBitrateHandler.calculateBitrate(uri, duration);
-            }
-            final bitrate = audioBitrateCache[uri];
-            if (bitrate != null) {
-              state = state.copyWith(audioBitrate: bitrate);
-              if (!audioBitrateController.isClosed) {
-                audioBitrateController.add(bitrate);
+            // Reads the file: off the event loop.
+            _runDetached(() async {
+              if (!audioBitrateCache.containsKey(Media.normalizeURI(uri))) {
+                audioBitrateCache[uri] = await FallbackBitrateHandler
+                    .calculateBitrate(uri, duration);
               }
-            }
+              final bitrate = audioBitrateCache[uri];
+              if (bitrate != null && !_detached) {
+                state = state.copyWith(audioBitrate: bitrate);
+                if (!audioBitrateController.isClosed) {
+                  audioBitrateController.add(bitrate);
+                }
+              }
+            });
           }
         }
       }
@@ -2319,183 +2333,208 @@ class NativePlayer extends PlatformPlayer {
     }
     if (event.ref.event_id == generated.mpv_event_id.MPV_EVENT_HOOK) {
       final prop = event.ref.data.cast<generated.mpv_event_hook>();
-      if (prop.ref.name.cast<Utf8>().toDartString() == 'on_load') {
-        // --------------------------------------------------
-        for (final hook in onLoadHooks) {
-          try {
-            await hook.call();
-          } catch (exception, stacktrace) {
-            print(exception);
-            print(stacktrace);
+      final name = prop.ref.name.cast<Utf8>().toDartString();
+      final id = prop.ref.id;
+      // Not awaited: mpv waits for mpv_hook_continue & keeps answering API calls meanwhile, whose replies
+      // come through this event loop. A hook that awaits setProperty or command would otherwise wait
+      // forever.
+      unawaited(_runHook(name, id));
+    }
+  }
+
+  /// Runs the hooks of mpv's hook [name], then lets mpv continue.
+  Future<void> _runHook(String name, int id) async {
+    try {
+      switch (name) {
+        case 'on_load':
+          await _runHooks(onLoadHooks);
+          if (_alive) {
+            _onLoad();
           }
-        }
-        // --------------------------------------------------
-        // Handle HTTP headers specified in the [Media].
-        try {
-          final name = 'path'.toNativeUtf8();
-          final uri = mpv.mpv_get_property_string(_live, name.cast());
-          // Get the headers for current [Media] by looking up [uri] in the [HashMap].
-          final headers = Media(uri.cast<Utf8>().toDartString()).httpHeaders;
-          if (headers != null) {
-            final property = 'http-header-fields'.toNativeUtf8();
-            // Allocate & fill the [mpv_node] with the headers.
-            final value = calloc<generated.mpv_node>();
-            value.ref.format = generated.mpv_format.MPV_FORMAT_NODE_ARRAY;
-            value.ref.u.list = calloc<generated.mpv_node_list>();
-            value.ref.u.list.ref.num = headers.length;
-            value.ref.u.list.ref.values = calloc<generated.mpv_node>(
-              headers.length,
-            );
-            final entries = headers.entries.toList();
-            for (int i = 0; i < entries.length; i++) {
-              final k = entries[i].key;
-              final v = entries[i].value;
-              final data = '$k: $v'.toNativeUtf8();
-              value.ref.u.list.ref.values[i].format =
-                  generated.mpv_format.MPV_FORMAT_STRING;
-              value.ref.u.list.ref.values[i].u.string = data.cast();
-            }
-            mpv.mpv_set_property(
-              _live,
-              property.cast(),
-              generated.mpv_format.MPV_FORMAT_NODE,
-              value.cast(),
-            );
-            // Free the allocated memory.
-            calloc.free(property);
-            for (int i = 0; i < value.ref.u.list.ref.num; i++) {
-              calloc.free(value.ref.u.list.ref.values[i].u.string);
-            }
-            calloc.free(value.ref.u.list.ref.values);
-            calloc.free(value.ref.u.list);
-            calloc.free(value);
+        case 'on_preloaded':
+          await _runHooks(onPreloadedHooks);
+        case 'on_unload':
+          await _runHooks(onUnloadHooks);
+          if (_alive) {
+            _onUnload();
           }
-          mpv.mpv_free(uri.cast());
-          calloc.free(name);
-        } catch (exception, stacktrace) {
-          print(exception);
-          print(stacktrace);
-        }
-        // Handle start & end position specified in the [Media].
-        try {
-          final name = 'playlist-pos'.toNativeUtf8();
-          final value = calloc<Int64>();
-          value.value = -1;
-
-          mpv.mpv_get_property(
-            _live,
-            name.cast(),
-            generated.mpv_format.MPV_FORMAT_INT64,
-            value.cast(),
-          );
-
-          final index = value.value;
-
-          calloc.free(name.cast());
-          calloc.free(value.cast());
-
-          if (index >= 0) {
-            final start = current[index].start;
-            final end = current[index].end;
-
-            if (start != null) {
-              try {
-                final property = 'start'.toNativeUtf8();
-                final value = (start.inMilliseconds / 1000)
-                    .toStringAsFixed(3)
-                    .toNativeUtf8();
-                mpv.mpv_set_property_string(_live, property.cast(), value.cast());
-                calloc.free(property);
-                calloc.free(value);
-              } catch (exception, stacktrace) {
-                print(exception);
-                print(stacktrace);
-              }
-            }
-
-            if (end != null) {
-              try {
-                final property = 'end'.toNativeUtf8();
-                final value = (end.inMilliseconds / 1000)
-                    .toStringAsFixed(3)
-                    .toNativeUtf8();
-                mpv.mpv_set_property_string(_live, property.cast(), value.cast());
-                calloc.free(property);
-                calloc.free(value);
-              } catch (exception, stacktrace) {
-                print(exception);
-                print(stacktrace);
-              }
-            }
-          }
-        } catch (_) {}
-        // --------------------------------------------------
-        mpv.mpv_hook_continue(_live, prop.ref.id);
       }
-      if (prop.ref.name.cast<Utf8>().toDartString() == 'on_preloaded') {
-        for (final hook in onPreloadedHooks) {
-          try {
-            await hook.call();
-          } catch (exception, stacktrace) {
-            print(exception);
-            print(stacktrace);
-          }
-        }
-        mpv.mpv_hook_continue(_live, prop.ref.id);
-      }
-      if (prop.ref.name.cast<Utf8>().toDartString() == 'on_unload') {
-        // --------------------------------------------------
-        for (final hook in onUnloadHooks) {
-          try {
-            await hook.call();
-          } catch (exception, stacktrace) {
-            print(exception);
-            print(stacktrace);
-          }
-        }
-        // --------------------------------------------------
-        // Set http-header-fields as [generated.mpv_format.MPV_FORMAT_NONE] [generated.mpv_node].
-        try {
-          final property = 'http-header-fields'.toNativeUtf8();
-          final value = calloc<generated.mpv_node>();
-          value.ref.format = generated.mpv_format.MPV_FORMAT_NONE;
-          mpv.mpv_set_property(
-            _live,
-            property.cast(),
-            generated.mpv_format.MPV_FORMAT_NODE,
-            value.cast(),
-          );
-          calloc.free(property);
-          calloc.free(value);
-        } catch (exception, stacktrace) {
-          print(exception);
-          print(stacktrace);
-        }
-        // Set start & end position as [generated.mpv_format.MPV_FORMAT_NONE] [generated.mpv_node].
-        try {
-          final property = 'start'.toNativeUtf8();
-          final value = 'none'.toNativeUtf8();
-          mpv.mpv_set_property_string(_live, property.cast(), value.cast());
-          calloc.free(property);
-          calloc.free(value);
-        } catch (exception, stacktrace) {
-          print(exception);
-          print(stacktrace);
-        }
-        try {
-          final property = 'end'.toNativeUtf8();
-          final value = 'none'.toNativeUtf8();
-          mpv.mpv_set_property_string(_live, property.cast(), value.cast());
-          calloc.free(property);
-          calloc.free(value);
-        } catch (exception, stacktrace) {
-          print(exception);
-          print(stacktrace);
-        }
-        // --------------------------------------------------
-        mpv.mpv_hook_continue(_live, prop.ref.id);
+    } catch (exception, stacktrace) {
+      print(exception);
+      print(stacktrace);
+    } finally {
+      if (_alive) {
+        mpv.mpv_hook_continue(_live, id);
       }
     }
+  }
+
+  Future<void> _runHooks(List<Future<void> Function()> hooks) async {
+    for (final hook in [...hooks]) {
+      try {
+        await hook.call();
+      } catch (exception, stacktrace) {
+        print(exception);
+        print(stacktrace);
+      }
+    }
+  }
+
+  /// `on_load`: the HTTP headers, start & end of the [Media] being loaded.
+  void _onLoad() {
+    // Handle HTTP headers specified in the [Media].
+    try {
+      final name = 'path'.toNativeUtf8();
+      final uri = mpv.mpv_get_property_string(_live, name.cast());
+      // Get the headers for current [Media] by looking up [uri] in the [HashMap].
+      final headers = Media(uri.cast<Utf8>().toDartString()).httpHeaders;
+      if (headers != null) {
+        final property = 'http-header-fields'.toNativeUtf8();
+        // Allocate & fill the [mpv_node] with the headers.
+        final value = calloc<generated.mpv_node>();
+        value.ref.format = generated.mpv_format.MPV_FORMAT_NODE_ARRAY;
+        value.ref.u.list = calloc<generated.mpv_node_list>();
+        value.ref.u.list.ref.num = headers.length;
+        value.ref.u.list.ref.values = calloc<generated.mpv_node>(
+          headers.length,
+        );
+        final entries = headers.entries.toList();
+        for (int i = 0; i < entries.length; i++) {
+          final k = entries[i].key;
+          final v = entries[i].value;
+          final data = '$k: $v'.toNativeUtf8();
+          value.ref.u.list.ref.values[i].format =
+              generated.mpv_format.MPV_FORMAT_STRING;
+          value.ref.u.list.ref.values[i].u.string = data.cast();
+        }
+        mpv.mpv_set_property(
+          _live,
+          property.cast(),
+          generated.mpv_format.MPV_FORMAT_NODE,
+          value.cast(),
+        );
+        // Free the allocated memory.
+        calloc.free(property);
+        for (int i = 0; i < value.ref.u.list.ref.num; i++) {
+          calloc.free(value.ref.u.list.ref.values[i].u.string);
+        }
+        calloc.free(value.ref.u.list.ref.values);
+        calloc.free(value.ref.u.list);
+        calloc.free(value);
+      }
+      mpv.mpv_free(uri.cast());
+      calloc.free(name);
+    } catch (exception, stacktrace) {
+      print(exception);
+      print(stacktrace);
+    }
+    // Handle start & end position specified in the [Media].
+    try {
+      final name = 'playlist-pos'.toNativeUtf8();
+      final value = calloc<Int64>();
+      value.value = -1;
+
+      mpv.mpv_get_property(
+        _live,
+        name.cast(),
+        generated.mpv_format.MPV_FORMAT_INT64,
+        value.cast(),
+      );
+
+      final index = value.value;
+
+      calloc.free(name.cast());
+      calloc.free(value.cast());
+
+      if (index >= 0) {
+        final start = current[index].start;
+        final end = current[index].end;
+
+        if (start != null) {
+          try {
+            final property = 'start'.toNativeUtf8();
+            final value = (start.inMilliseconds / 1000)
+                .toStringAsFixed(3)
+                .toNativeUtf8();
+            mpv.mpv_set_property_string(_live, property.cast(), value.cast());
+            calloc.free(property);
+            calloc.free(value);
+          } catch (exception, stacktrace) {
+            print(exception);
+            print(stacktrace);
+          }
+        }
+
+        if (end != null) {
+          try {
+            final property = 'end'.toNativeUtf8();
+            final value = (end.inMilliseconds / 1000)
+                .toStringAsFixed(3)
+                .toNativeUtf8();
+            mpv.mpv_set_property_string(_live, property.cast(), value.cast());
+            calloc.free(property);
+            calloc.free(value);
+          } catch (exception, stacktrace) {
+            print(exception);
+            print(stacktrace);
+          }
+        }
+      }
+    } catch (_) {}
+  }
+
+  /// `on_unload`: resets what [_onLoad] set.
+  void _onUnload() {
+    // Set http-header-fields as [generated.mpv_format.MPV_FORMAT_NONE] [generated.mpv_node].
+    try {
+      final property = 'http-header-fields'.toNativeUtf8();
+      final value = calloc<generated.mpv_node>();
+      value.ref.format = generated.mpv_format.MPV_FORMAT_NONE;
+      mpv.mpv_set_property(
+        _live,
+        property.cast(),
+        generated.mpv_format.MPV_FORMAT_NODE,
+        value.cast(),
+      );
+      calloc.free(property);
+      calloc.free(value);
+    } catch (exception, stacktrace) {
+      print(exception);
+      print(stacktrace);
+    }
+    // Set start & end position as [generated.mpv_format.MPV_FORMAT_NONE] [generated.mpv_node].
+    try {
+      final property = 'start'.toNativeUtf8();
+      final value = 'none'.toNativeUtf8();
+      mpv.mpv_set_property_string(_live, property.cast(), value.cast());
+      calloc.free(property);
+      calloc.free(value);
+    } catch (exception, stacktrace) {
+      print(exception);
+      print(stacktrace);
+    }
+    try {
+      final property = 'end'.toNativeUtf8();
+      final value = 'none'.toNativeUtf8();
+      mpv.mpv_set_property_string(_live, property.cast(), value.cast());
+      calloc.free(property);
+      calloc.free(value);
+    } catch (exception, stacktrace) {
+      print(exception);
+      print(stacktrace);
+    }
+  }
+
+  /// Runs [listener] outside the event loop, logging what it throws.
+  void _runDetached(Future<void> Function() listener) {
+    unawaited(
+      Future<void>.sync(listener).catchError(
+        (Object exception, StackTrace stacktrace) {
+          print(exception);
+          print(stacktrace);
+        },
+      ),
+    );
   }
 
   /// Creates & configures the mpv handle. A failure completes [completer] with the error, so the
@@ -2944,8 +2983,8 @@ class NativePlayer extends PlatformPlayer {
   }
 
   /// Hooks run inside mpv's `on_preloaded` hook: the demuxer is open & `track-list` is known, but no
-  /// decoders exist yet. mpv waits for them & this player's event loop is blocked meanwhile, so they
-  /// must only make synchronous mpv calls (see [setPropertySync]).
+  /// decoders exist yet. mpv waits for them before it creates the decoders, so a property they set
+  /// synchronously (see [setPropertySync]) applies to this file's decoders.
   final List<Future<void> Function()> onPreloadedHooks = [];
 
   /// A flag to prevent changes to [state.playing] due to `loadfile` commands in [open].
@@ -2972,6 +3011,17 @@ class NativePlayer extends PlatformPlayer {
 
   /// Current loaded [Media] queue.
   List<Media> current = <Media>[];
+
+  /// The ids of the [observeProperty] observers start here, far above the internal observers' ids
+  /// (`String.hashCode`).
+  static const int _userObserverIdBase = 1 << 40;
+
+  int _nextUserObserverId = _userObserverIdBase;
+
+  /// The [observeProperty] observers: property → id, & id → listener.
+  final HashMap<String, int> _userObserverIds = HashMap<String, int>();
+  final HashMap<int, Future<void> Function(String)> _userObservers =
+      HashMap<int, Future<void> Function(String)>();
 
   /// Currently observed properties through [observeProperty].
   final HashMap<String, Future<void> Function(String)> observedProperties =
