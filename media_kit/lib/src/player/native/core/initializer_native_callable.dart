@@ -69,7 +69,7 @@ class InitializerNativeCallable {
       calloc.free(value);
     }
     mpv.mpv_initialize(ctx);
-    _pumps[ctx.address] = _EventPump(callback);
+    _pumps[ctx.address] = _EventPump(callback, Zone.current);
     guardian.wakeups.keepIsolateAlive = true;
     guardian.control.send(['add', ctx.address]);
     mpv.mpv_set_wakeup_callback(ctx, guardian.wakeup, ctx.cast());
@@ -122,7 +122,8 @@ class InitializerNativeCallable {
     if (pump == null || pump.closed || pump.draining) {
       return;
     }
-    _drain(ctx, pump);
+    // In the zone of the code that created the handle, not the one that started the guardian.
+    pump.zone.run(() => _drain(ctx, pump));
   }
 
   Future<void> _drain(
@@ -251,9 +252,12 @@ void _guardian(List<Object?> arguments) {
 
 /// The event delivery of one mpv handle.
 class _EventPump {
-  _EventPump(this.callback);
+  _EventPump(this.callback, this.zone);
 
   final EventCallback callback;
+
+  /// The zone [InitializerNativeCallable.create] was called in: the events are delivered in it.
+  final Zone zone;
 
   /// Whether a drain is reading the handle's events.
   bool draining = false;

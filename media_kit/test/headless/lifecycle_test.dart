@@ -421,8 +421,9 @@ void main() {
       );
       unawaited(player.open(Media(TestMedia.h264)));
       await entered.future.timeout(const Duration(seconds: 10));
-      // dispose gives up waiting for the listener, but must not destroy the handle it still reads.
-      await player.dispose().timeout(const Duration(seconds: 30));
+      // dispose gives up waiting for the listener, but must not destroy the handle it still reads. Up to
+      // three bounded waits of 10 s: the open stuck behind the listener, stop, the event drain.
+      await player.dispose().timeout(const Duration(seconds: 45));
       expect(await player.handle, isNot(0), reason: 'destroyed under the listener');
       release.complete();
       await waitUntil(
@@ -436,7 +437,7 @@ void main() {
         await Future.delayed(const Duration(milliseconds: 50));
       }
       expect(destroyed, isTrue, reason: 'never destroyed after the listener finished');
-    }, timeout: const Timeout(Duration(minutes: 1)));
+    }, timeout: const Timeout(Duration(minutes: 2)));
   });
 
   group('isolation', () {
