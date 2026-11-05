@@ -329,7 +329,29 @@ void main() {
         reason:
             "B.play() waited for all of A's queued seeks: every player shares one static lock (P1-C2)",
       );
-    }, tags: 'known-failing');
+    });
+    test('lifecycle-stuck-video-controller-blocks-only-its-player', () async {
+      final stuck = await createPlayer();
+      final other = await createPlayer();
+      await stuck.handle;
+      // A VideoController whose initialization never finishes: a hidden window, a texture id that never comes.
+      stuck.platform!.isVideoControllerAttached = true;
+      final stuckOpen = timed(() => stuck.open(Media(TestMedia.h264)));
+      final otherPlay = await timed(
+        () => openAndPlay(other, TestMedia.h264),
+      );
+      expect(
+        otherPlay,
+        lessThan(const Duration(seconds: 5)),
+        reason: "another player's stuck VideoController blocked this player",
+      );
+      final opened = await stuckOpen.timeout(const Duration(seconds: 20));
+      print(
+        'lifecycle-stuck-video-controller-blocks-only-its-player: other ${otherPlay.inMilliseconds} ms, stuck open ${opened.inMilliseconds} ms',
+      );
+      expect(opened, lessThan(const Duration(seconds: 15)));
+      await stuck.dispose().timeout(const Duration(seconds: 20));
+    }, timeout: const Timeout(Duration(minutes: 1)));
     test('lifecycle-unobserve-property-keeps-position', () async {
       final player = await createPlayer();
       final native = player.platform as NativePlayer;

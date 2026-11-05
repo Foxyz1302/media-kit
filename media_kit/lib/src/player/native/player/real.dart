@@ -85,12 +85,14 @@ class NativePlayer extends PlatformPlayer {
   /// {@macro native_player}
   NativePlayer({required super.configuration})
       : mpv = generated.MPV(DynamicLibrary.open(NativeLibrary.path)) {
-    future = _create()
-      ..then((_) {
-        try {
-          configuration.ready?.call();
-        } catch (_) {}
-      });
+    future = _create().then((created) {
+      if (!created) {
+        return;
+      }
+      try {
+        configuration.ready?.call();
+      } catch (_) {}
+    });
   }
 
   /// Disposes the [Player] instance & releases the resources.
@@ -100,11 +102,19 @@ class NativePlayer extends PlatformPlayer {
       if (disposed) {
         throw AssertionError('[Player] has been disposed');
       }
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      // A player whose initialization failed or never finished still disposes.
+      var initialized = true;
+      try {
+        await _ready();
+      } catch (exception) {
+        initialized = false;
+        print('media_kit: NativePlayer: dispose without initialization: $exception');
+      }
 
-      await NativeReferenceHolder.instance.remove(ctx);
-      await stop(notify: false, synchronized: false);
+      if (initialized) {
+        await NativeReferenceHolder.instance.remove(ctx);
+        await stop(notify: false, synchronized: false);
+      }
 
       disposed = true;
       _positionEmitter.cancel();
@@ -113,15 +123,18 @@ class NativePlayer extends PlatformPlayer {
 
       await super.dispose();
 
-      Initializer(mpv).dispose(ctx);
+      if (ctx != nullptr) {
+        final ctx = this.ctx;
+        Initializer(mpv).dispose(ctx);
 
-      Future.delayed(const Duration(seconds: 5), () {
-        mpv.mpv_terminate_destroy(ctx);
-      });
+        Future.delayed(const Duration(seconds: 5), () {
+          mpv.mpv_terminate_destroy(ctx);
+        });
+      }
     }
 
     if (synchronized) {
-      return lock.synchronized(function);
+      return _lock.synchronized(function);
     } else {
       return function();
     }
@@ -155,8 +168,7 @@ class NativePlayer extends PlatformPlayer {
       if (disposed) {
         throw AssertionError('[Player] has been disposed');
       }
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
 
       final int index;
       final List<Media> playlist = <Media>[];
@@ -233,7 +245,7 @@ class NativePlayer extends PlatformPlayer {
     }
 
     if (synchronized) {
-      return lock.synchronized(function);
+      return _lock.synchronized(function);
     } else {
       return function();
     }
@@ -251,8 +263,7 @@ class NativePlayer extends PlatformPlayer {
       if (disposed) {
         throw AssertionError('[Player] has been disposed');
       }
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
 
       isShuffleEnabled = false;
       isPlayingStateChangeAllowed = false;
@@ -358,7 +369,7 @@ class NativePlayer extends PlatformPlayer {
     }
 
     if (synchronized) {
-      return lock.synchronized(function);
+      return _lock.synchronized(function);
     } else {
       return function();
     }
@@ -371,8 +382,7 @@ class NativePlayer extends PlatformPlayer {
       if (disposed) {
         throw AssertionError('[Player] has been disposed');
       }
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
 
       state = state.copyWith(playing: true);
       if (!playingController.isClosed) {
@@ -390,7 +400,7 @@ class NativePlayer extends PlatformPlayer {
     }
 
     if (synchronized) {
-      return lock.synchronized(function);
+      return _lock.synchronized(function);
     } else {
       return function();
     }
@@ -403,8 +413,7 @@ class NativePlayer extends PlatformPlayer {
       if (disposed) {
         throw AssertionError('[Player] has been disposed');
       }
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
 
       state = state.copyWith(playing: false);
       if (!playingController.isClosed) {
@@ -417,7 +426,7 @@ class NativePlayer extends PlatformPlayer {
     }
 
     if (synchronized) {
-      return lock.synchronized(function);
+      return _lock.synchronized(function);
     } else {
       return function();
     }
@@ -430,8 +439,7 @@ class NativePlayer extends PlatformPlayer {
       if (disposed) {
         throw AssertionError('[Player] has been disposed');
       }
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
 
       if (notify) {
         // Do not change the [state.playing] value if [playOrPause] was called from [play] or [pause]; where the [state.playing] value is already changed.
@@ -453,7 +461,7 @@ class NativePlayer extends PlatformPlayer {
     }
 
     if (synchronized) {
-      return lock.synchronized(function);
+      return _lock.synchronized(function);
     } else {
       return function();
     }
@@ -466,8 +474,7 @@ class NativePlayer extends PlatformPlayer {
       if (disposed) {
         throw AssertionError('[Player] has been disposed');
       }
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
 
       // External List<Media>:
       // ---------------------------------------------
@@ -484,7 +491,7 @@ class NativePlayer extends PlatformPlayer {
     }
 
     if (synchronized) {
-      return lock.synchronized(function);
+      return _lock.synchronized(function);
     } else {
       return function();
     }
@@ -497,8 +504,7 @@ class NativePlayer extends PlatformPlayer {
       if (disposed) {
         throw AssertionError('[Player] has been disposed');
       }
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
 
       int currentIndex = state.playlist.index;
 
@@ -575,7 +581,7 @@ class NativePlayer extends PlatformPlayer {
     }
 
     if (synchronized) {
-      return lock.synchronized(function);
+      return _lock.synchronized(function);
     } else {
       return function();
     }
@@ -588,8 +594,7 @@ class NativePlayer extends PlatformPlayer {
       if (disposed) {
         throw AssertionError('[Player] has been disposed');
       }
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
 
       // Do nothing if currently present at the first or last index & playlist mode is [PlaylistMode.none] or [PlaylistMode.single].
       if ([
@@ -605,7 +610,7 @@ class NativePlayer extends PlatformPlayer {
     }
 
     if (synchronized) {
-      return lock.synchronized(function);
+      return _lock.synchronized(function);
     } else {
       return function();
     }
@@ -618,8 +623,7 @@ class NativePlayer extends PlatformPlayer {
       if (disposed) {
         throw AssertionError('[Player] has been disposed');
       }
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
 
       // Do nothing if currently present at the first or last index & playlist mode is [PlaylistMode.none] or [PlaylistMode.single].
       if ([
@@ -635,7 +639,7 @@ class NativePlayer extends PlatformPlayer {
     }
 
     if (synchronized) {
-      return lock.synchronized(function);
+      return _lock.synchronized(function);
     } else {
       return function();
     }
@@ -648,15 +652,14 @@ class NativePlayer extends PlatformPlayer {
       if (disposed) {
         throw AssertionError('[Player] has been disposed');
       }
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
 
       await play(synchronized: false);
       await _setPropertyInt64('playlist-pos', index);
     }
 
     if (synchronized) {
-      return lock.synchronized(function);
+      return _lock.synchronized(function);
     } else {
       return function();
     }
@@ -669,8 +672,7 @@ class NativePlayer extends PlatformPlayer {
       if (disposed) {
         throw AssertionError('[Player] has been disposed');
       }
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
 
       // External List<Media>:
       // ---------------------------------------------
@@ -695,7 +697,7 @@ class NativePlayer extends PlatformPlayer {
     }
 
     if (synchronized) {
-      return lock.synchronized(function);
+      return _lock.synchronized(function);
     } else {
       return function();
     }
@@ -709,8 +711,7 @@ class NativePlayer extends PlatformPlayer {
         throw AssertionError('[Player] has been disposed');
       }
 
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
 
       // The position after a seek goes out at once, whatever [PlayerConfiguration.positionUpdateInterval].
       _positionEmitter.nextAtOnce();
@@ -735,7 +736,7 @@ class NativePlayer extends PlatformPlayer {
     }
 
     if (synchronized) {
-      return lock.synchronized(function);
+      return _lock.synchronized(function);
     } else {
       return function();
     }
@@ -751,8 +752,7 @@ class NativePlayer extends PlatformPlayer {
       if (disposed) {
         throw AssertionError('[Player] has been disposed');
       }
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
 
       switch (playlistMode) {
         case PlaylistMode.none:
@@ -782,7 +782,7 @@ class NativePlayer extends PlatformPlayer {
     }
 
     if (synchronized) {
-      return lock.synchronized(function);
+      return _lock.synchronized(function);
     } else {
       return function();
     }
@@ -795,14 +795,13 @@ class NativePlayer extends PlatformPlayer {
       if (disposed) {
         throw AssertionError('[Player] has been disposed');
       }
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
 
       await _setPropertyDouble('volume', volume);
     }
 
     if (synchronized) {
-      return lock.synchronized(function);
+      return _lock.synchronized(function);
     } else {
       return function();
     }
@@ -815,8 +814,7 @@ class NativePlayer extends PlatformPlayer {
       if (disposed) {
         throw AssertionError('[Player] has been disposed');
       }
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
 
       if (rate <= 0.0) {
         throw ArgumentError.value(rate, 'rate', 'Must be greater than 0.0');
@@ -850,7 +848,7 @@ class NativePlayer extends PlatformPlayer {
     }
 
     if (synchronized) {
-      return lock.synchronized(function);
+      return _lock.synchronized(function);
     } else {
       return function();
     }
@@ -863,8 +861,7 @@ class NativePlayer extends PlatformPlayer {
       if (disposed) {
         throw AssertionError('[Player] has been disposed');
       }
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
 
       if (configuration.pitch) {
         if (pitch <= 0.0) {
@@ -894,7 +891,7 @@ class NativePlayer extends PlatformPlayer {
     }
 
     if (synchronized) {
-      return lock.synchronized(function);
+      return _lock.synchronized(function);
     } else {
       return function();
     }
@@ -907,8 +904,7 @@ class NativePlayer extends PlatformPlayer {
       if (disposed) {
         throw AssertionError('[Player] has been disposed');
       }
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
 
       if (shuffle == isShuffleEnabled) {
         return;
@@ -943,7 +939,7 @@ class NativePlayer extends PlatformPlayer {
     }
 
     if (synchronized) {
-      return lock.synchronized(function);
+      return _lock.synchronized(function);
     } else {
       return function();
     }
@@ -962,14 +958,13 @@ class NativePlayer extends PlatformPlayer {
       if (disposed) {
         throw AssertionError('[Player] has been disposed');
       }
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
 
       await _setPropertyString('audio-device', audioDevice.name);
     }
 
     if (synchronized) {
-      return lock.synchronized(function);
+      return _lock.synchronized(function);
     } else {
       return function();
     }
@@ -985,8 +980,7 @@ class NativePlayer extends PlatformPlayer {
       if (disposed) {
         throw AssertionError('[Player] has been disposed');
       }
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
 
       await _setPropertyString('vid', track.id);
       state = state.copyWith(track: state.track.copyWith(video: track));
@@ -996,7 +990,7 @@ class NativePlayer extends PlatformPlayer {
     }
 
     if (synchronized) {
-      return lock.synchronized(function);
+      return _lock.synchronized(function);
     } else {
       return function();
     }
@@ -1024,8 +1018,7 @@ class NativePlayer extends PlatformPlayer {
       if (disposed) {
         throw AssertionError('[Player] has been disposed');
       }
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
 
       if (track.uri) {
         await _command([
@@ -1049,7 +1042,7 @@ class NativePlayer extends PlatformPlayer {
     }
 
     if (synchronized) {
-      return lock.synchronized(function);
+      return _lock.synchronized(function);
     } else {
       return function();
     }
@@ -1080,8 +1073,7 @@ class NativePlayer extends PlatformPlayer {
       if (disposed) {
         throw AssertionError('[Player] has been disposed');
       }
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
 
       // Reset existing Player.state.subtitle & Player.stream.subtitle.
       state = state.copyWith(subtitle: const PlayerState().subtitle);
@@ -1125,7 +1117,7 @@ class NativePlayer extends PlatformPlayer {
     }
 
     if (synchronized) {
-      return lock.synchronized(function);
+      return _lock.synchronized(function);
     } else {
       return function();
     }
@@ -1158,8 +1150,7 @@ class NativePlayer extends PlatformPlayer {
         throw AssertionError('[Player] has been disposed');
       }
 
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
 
       return compute(
         _screenshot,
@@ -1173,7 +1164,7 @@ class NativePlayer extends PlatformPlayer {
     }
 
     if (synchronized) {
-      return lock.synchronized(function);
+      return _lock.synchronized(function);
     } else {
       return function();
     }
@@ -1185,7 +1176,7 @@ class NativePlayer extends PlatformPlayer {
   ///
   @override
   Future<int> get handle async {
-    await waitForPlayerInitialization;
+    await _playerReady();
     return ctx.address;
   }
 
@@ -1206,8 +1197,7 @@ class NativePlayer extends PlatformPlayer {
     }
 
     if (waitForInitialization) {
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
     }
 
     // Go through the same path as [command] so that, when
@@ -1258,8 +1248,7 @@ class NativePlayer extends PlatformPlayer {
     }
 
     if (waitForInitialization) {
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
     }
 
     final name = property.toNativeUtf8();
@@ -1295,8 +1284,7 @@ class NativePlayer extends PlatformPlayer {
     }
 
     if (waitForInitialization) {
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
     }
 
     if (observedProperties.containsKey(property)) {
@@ -1330,8 +1318,7 @@ class NativePlayer extends PlatformPlayer {
     }
 
     if (waitForInitialization) {
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
     }
 
     if (!observedProperties.containsKey(property)) {
@@ -1358,8 +1345,7 @@ class NativePlayer extends PlatformPlayer {
     }
 
     if (waitForInitialization) {
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
     }
 
     if (observedEvents.containsKey(event)) {
@@ -1385,8 +1371,7 @@ class NativePlayer extends PlatformPlayer {
     }
 
     if (waitForInitialization) {
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
     }
 
     if (!observedEvents.containsKey(event)) {
@@ -1412,8 +1397,7 @@ class NativePlayer extends PlatformPlayer {
     }
 
     if (waitForInitialization) {
-      await waitForPlayerInitialization;
-      await waitForVideoControllerInitializationIfAttached;
+      await _ready();
     }
 
     await _command(command);
@@ -2338,8 +2322,25 @@ class NativePlayer extends PlatformPlayer {
     }
   }
 
-  Future<void> _create() {
-    return lock.synchronized(() async {
+  /// Creates & configures the mpv handle. A failure completes [completer] with the error, so the
+  /// calls waiting for initialization throw instead of waiting forever. Returns whether it succeeded.
+  Future<bool> _create() async {
+    try {
+      await _createHandle();
+      return true;
+    } catch (exception, stacktrace) {
+      print(exception);
+      print(stacktrace);
+      if (!completer.isCompleted) {
+        completer.future.ignore();
+        completer.completeError(exception, stacktrace);
+      }
+      return false;
+    }
+  }
+
+  Future<void> _createHandle() {
+    return _lock.synchronized(() async {
       // The options which must be set before [MPV.mpv_initialize].
       final options = <String, String>{
         // Set --vid=no by default to prevent redundant video decoding.
@@ -2379,6 +2380,9 @@ class NativePlayer extends PlatformPlayer {
       }
 
       ctx = await Initializer(mpv).create(_handler, options: options);
+      if (ctx == nullptr) {
+        throw StateError('mpv_create failed');
+      }
 
       // ALL:
       //
@@ -2802,8 +2806,55 @@ class NativePlayer extends PlatformPlayer {
   /// The methods which must execute synchronously before playback of a source can end.
   final List<Future<void> Function()> onUnloadHooks = [];
 
-  /// Synchronization & mutual exclusion between methods of this class.
+  /// Unused: every [NativePlayer] serializes its own methods through its own lock, so one player that
+  /// waits (an open, a dispose, a VideoController that never finishes) no longer blocks the others.
+  @Deprecated('Each NativePlayer has its own lock; this one is not used anymore.')
   static final Lock lock = Lock();
+
+  /// Synchronization & mutual exclusion between the methods of this instance.
+  final Lock _lock = Lock();
+
+  /// How long a call waits for the player's own initialization before it throws.
+  static const Duration _playerInitTimeout = Duration(seconds: 20);
+
+  /// How long the calls wait for an attached [VideoController]'s initialization. Past it they go on
+  /// without it: the controller sets its properties itself once it's up.
+  static const Duration _videoControllerInitTimeout = Duration(seconds: 10);
+
+  /// The bounded wait for the attached VideoController, shared by every call once it started.
+  Future<void>? _videoControllerWait;
+
+  /// Waits for the player's initialization, bounded by [_playerInitTimeout].
+  Future<void> _playerReady() {
+    return waitForPlayerInitialization.timeout(
+      _playerInitTimeout,
+      onTimeout: () => throw TimeoutException(
+        '[Player] initialization did not finish',
+        _playerInitTimeout,
+      ),
+    );
+  }
+
+  /// Waits for an attached VideoController's initialization, bounded by [_videoControllerInitTimeout].
+  Future<void> _videoControllerReady() {
+    if (!isVideoControllerAttached || videoControllerCompleter.isCompleted) {
+      return Future<void>.value();
+    }
+    return _videoControllerWait ??= videoControllerCompleter.future.timeout(
+      _videoControllerInitTimeout,
+      onTimeout: () {
+        print(
+          'media_kit: NativePlayer: VideoController initialization did not finish within $_videoControllerInitTimeout; continuing without it.',
+        );
+      },
+    );
+  }
+
+  /// Waits for the player's & the attached VideoController's initialization; both waits are bounded.
+  Future<void> _ready() async {
+    await _playerReady();
+    await _videoControllerReady();
+  }
 
   /// [HashMap] for retrieving previously fetched audio-bitrate(s).
   static final HashMap<String, double> audioBitrateCache =
