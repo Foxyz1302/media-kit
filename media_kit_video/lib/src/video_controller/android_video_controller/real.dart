@@ -14,6 +14,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/src/utils/query_decoders.dart';
+import 'package:media_kit_video/src/video_controller/hardware_decoder_budget.dart';
 import 'package:media_kit_video/src/video_controller/native_video_controller/native_video_controller.dart';
 import 'package:media_kit_video/src/video_controller/platform_video_controller.dart';
 import 'package:synchronized/synchronized.dart';
@@ -64,6 +65,9 @@ class AndroidVideoController extends PlatformVideoController {
   /// Fits the Surface to [_views] once their sizes have settled.
   Timer? _settle;
 
+  /// Time since a view showing this output last changed its size (not since one was added).
+  final _sinceViewResize = Stopwatch();
+
   /// Whether the Surface follows [_views] (per [VideoControllerConfiguration.renderAtWidgetSize], on by
   /// default): only when mpv renders into it. A decoder writing into it directly (`mediacodec_embed`)
   /// picks its own buffer size.
@@ -72,6 +76,10 @@ class AndroidVideoController extends PlatformVideoController {
       (configuration.vo == 'gpu' || configuration.vo == 'gpu-next');
 
   NativePlayer get platform => player.platform as NativePlayer;
+
+  /// This player's share of [VideoController.maxHardwareDecoders]; none with `mediacodec_embed`, which
+  /// can only show hardware-decoded video.
+  HardwareDecoderBudget? _budget;
 
   /// The Surface size for a [width] x [height] video: the video's own size, scaled down (aspect ratio
   /// kept) to fit the display's physical resolution in the video's orientation. A 4K video on a phone
@@ -134,9 +142,12 @@ class AndroidVideoController extends PlatformVideoController {
   }
 
   /// The Surface size for a [width] x [height] video: [surfaceSizeFor], or the size the views show it at.
+  /// [surfaceSizeFor] while a view is still changing size (e.g. a route transition): the Surface can't
+  /// follow it without a new video output, & a Surface sized from a passing frame of the animation would
+  /// soon be resized anyway.
   ({int width, int height}) _surfaceSizeFor(int width, int height) {
     final cap = surfaceSizeFor(width, height);
-    if (!_followsViews) {
+    if (!_followsViews || _viewsMoving) {
       return cap;
     }
     return viewSurfaceSizeFor(
@@ -160,6 +171,12 @@ class AndroidVideoController extends PlatformVideoController {
     if (size == null || size.isEmpty || !size.isFinite) {
       _views.remove(view);
     } else {
+      final previous = _views[view];
+      if (previous != null && previous.size != size) {
+        _sinceViewResize
+          ..reset()
+          ..start();
+      }
       _views[view] = (size: size, fit: fit, aspectRatio: aspectRatio);
       _lastViews = _views.values.toList();
     }
@@ -170,9 +187,13 @@ class AndroidVideoController extends PlatformVideoController {
     _settle = Timer(settleDelay, _followViews);
   }
 
-  /// Resizes the Surface to the size [_views] show the video at, once they have settled. Only for a change
-  /// of more than a tenth of the longer side, & never while no view is left: each resize is a new Surface &
-  /// a new video output in mpv.
+  bool get _viewsMoving => _sinceViewResize.isRunning && _sinceViewResize.elapsed < settleDelay;
+
+  /// Grows the Surface to the size [_views] show the video at, once they have settled. Only for a growth
+  /// of more than a tenth of the longer side, & never while no view is left. Each resize is a new Surface &
+  /// a new video output in mpv, whose refresh seek decodes from the previous keyframe: the picture stops
+  /// for up to ~1 s on a 4K file. So the Surface never shrinks during a file (a smaller view shows the
+  /// larger Surface scaled down); the next file is sized for the views.
   Future<void> _followViews() => lock.synchronized(() async {
         if (_disposed || !_followsViews || _views.isEmpty) {
           return;
@@ -192,7 +213,7 @@ class AndroidVideoController extends PlatformVideoController {
         final surface = _surfaceSizeFor(width, height);
         final now = math.max(current.width, current.height);
         final next = math.max(surface.width, surface.height);
-        if ((next - now).abs() <= now / 10) {
+        if (next - now <= now / 10) {
           return;
         }
         final handle = await player.handle;
@@ -458,6 +479,15 @@ class AndroidVideoController extends PlatformVideoController {
 
     // Register [_dispose] for execution upon [Player.dispose].
     player.platform?.release.add(controller._dispose);
+    if (configuration.vo != 'mediacodec_embed') {
+      final budget = controller._budget = HardwareDecoderBudget(
+        player,
+        configuration.hwdec!,
+        visible: () => controller._views.isNotEmpty,
+      );
+      controller.platform.onPreloadedHooks.add(budget.onPreloaded);
+      controller.platform.onUnloadHooks.add(budget.onUnload);
+    }
     controller.platform.onPreloadedHooks.add(controller._onPreloaded);
 
     // Store the [VideoController] in the [_controllers].
@@ -508,6 +538,12 @@ class AndroidVideoController extends PlatformVideoController {
     wid.dispose();
     wid.removeListener(widListener);
     platform.onPreloadedHooks.remove(_onPreloaded);
+    final budget = _budget;
+    if (budget != null) {
+      platform.onPreloadedHooks.remove(budget.onPreloaded);
+      platform.onUnloadHooks.remove(budget.onUnload);
+      budget.dispose();
+    }
     await videoParamsSubscription?.cancel();
     final handle = await player.handle;
     _controllers.remove(handle);

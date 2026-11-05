@@ -31,6 +31,7 @@ import 'package:media_kit/src/player/native/utils/android_helper.dart';
 import 'package:media_kit/src/player/native/utils/isolates.dart';
 import 'package:media_kit/src/player/native/utils/native_reference_holder.dart';
 import 'package:media_kit/src/player/native/utils/temp_file.dart';
+import 'package:media_kit/src/player/native/utils/throttled_emitter.dart';
 import 'package:media_kit/src/player/platform_player.dart';
 import 'package:meta/meta.dart';
 import 'package:path/path.dart';
@@ -106,6 +107,9 @@ class NativePlayer extends PlatformPlayer {
       await stop(notify: false, synchronized: false);
 
       disposed = true;
+      _positionEmitter.cancel();
+      _bufferEmitter.cancel();
+      _bufferingPercentageEmitter.cancel();
 
       await super.dispose();
 
@@ -290,6 +294,7 @@ class NativePlayer extends PlatformPlayer {
         if (!completedController.isClosed) {
           completedController.add(false);
         }
+        _positionEmitter.cancel();
         if (!positionController.isClosed) {
           positionController.add(Duration.zero);
         }
@@ -308,6 +313,8 @@ class NativePlayer extends PlatformPlayer {
         if (!bufferingController.isClosed) {
           bufferingController.add(false);
         }
+        _bufferEmitter.cancel();
+        _bufferingPercentageEmitter.cancel();
         if (!bufferController.isClosed) {
           bufferController.add(Duration.zero);
         }
@@ -705,6 +712,8 @@ class NativePlayer extends PlatformPlayer {
       await waitForPlayerInitialization;
       await waitForVideoControllerInitializationIfAttached;
 
+      // The position after a seek goes out at once, whatever [PlayerConfiguration.positionUpdateInterval].
+      _positionEmitter.nextAtOnce();
       if (_awaitingFile) {
         // Right after [open], mpv has no file to seek in yet & rejects the command. Keep the request &
         // apply it on MPV_EVENT_FILE_LOADED.
@@ -1536,6 +1545,11 @@ class NativePlayer extends PlatformPlayer {
         _pendingSeek = null;
       }
     }
+    if (event.ref.event_id == generated.mpv_event_id.MPV_EVENT_PLAYBACK_RESTART) {
+      // Playback (re)started after a load or a seek: its position goes out at once.
+      _positionEmitter.nextAtOnce();
+      _flushThrottled();
+    }
     if (event.ref.event_id == generated.mpv_event_id.MPV_EVENT_START_FILE) {
       if (isPlayingStateChangeAllowed) {
         state = state.copyWith(playing: true, completed: false);
@@ -1577,6 +1591,9 @@ class NativePlayer extends PlatformPlayer {
       if (prop.ref.name.cast<Utf8>().toDartString() == 'pause' &&
           prop.ref.format == generated.mpv_format.MPV_FORMAT_FLAG) {
         final playing = prop.ref.data.cast<Int8>().value == 0;
+        if (!playing) {
+          _flushThrottled();
+        }
         if (isPlayingStateChangeAllowed) {
           state = state.copyWith(playing: playing);
           if (!playingController.isClosed) {
@@ -1617,9 +1634,7 @@ class NativePlayer extends PlatformPlayer {
           microseconds: prop.ref.data.cast<Double>().value * 1e6 ~/ 1,
         );
         state = state.copyWith(buffer: buffer);
-        if (!bufferController.isClosed) {
-          bufferController.add(buffer);
-        }
+        _bufferEmitter.add(buffer);
       }
       if (prop.ref.name.cast<Utf8>().toDartString() ==
               'cache-buffering-state' &&
@@ -1627,9 +1642,7 @@ class NativePlayer extends PlatformPlayer {
         final bufferingPercentage = prop.ref.data.cast<Double>().value;
 
         state = state.copyWith(bufferingPercentage: bufferingPercentage);
-        if (!bufferingPercentageController.isClosed) {
-          bufferingPercentageController.add(bufferingPercentage);
-        }
+        _bufferingPercentageEmitter.add(bufferingPercentage);
       }
       if (prop.ref.name.cast<Utf8>().toDartString() == 'time-pos' &&
           prop.ref.format == generated.mpv_format.MPV_FORMAT_DOUBLE) {
@@ -1637,9 +1650,7 @@ class NativePlayer extends PlatformPlayer {
           microseconds: prop.ref.data.cast<Double>().value * 1e6 ~/ 1,
         );
         state = state.copyWith(position: position);
-        if (!positionController.isClosed) {
-          positionController.add(position);
-        }
+        _positionEmitter.add(position);
       }
       if (prop.ref.name.cast<Utf8>().toDartString() == 'duration' &&
           prop.ref.format == generated.mpv_format.MPV_FORMAT_DOUBLE) {
@@ -1997,6 +2008,7 @@ class NativePlayer extends PlatformPlayer {
           prop.ref.format == generated.mpv_format.MPV_FORMAT_FLAG) {
         final value = prop.ref.data.cast<Bool>().value;
         if (value) {
+          _flushThrottled();
           if (isPlayingStateChangeAllowed) {
             state = state.copyWith(playing: false, completed: true);
             if (!playingController.isClosed) {
@@ -2710,6 +2722,40 @@ class NativePlayer extends PlatformPlayer {
   /// until then, so [seek] stores the last request in [_pendingSeek] & MPV_EVENT_FILE_LOADED applies it.
   bool _awaitingFile = false;
   Duration? _pendingSeek;
+
+  /// [PlayerStream.position], [PlayerStream.buffer] & [PlayerStream.bufferingPercentage], at most once per
+  /// [PlayerConfiguration.positionUpdateInterval].
+  late final _positionEmitter = ThrottledEmitter<Duration>(
+    configuration.positionUpdateInterval,
+    (value) {
+      if (!positionController.isClosed) {
+        positionController.add(value);
+      }
+    },
+  );
+  late final _bufferEmitter = ThrottledEmitter<Duration>(
+    configuration.positionUpdateInterval,
+    (value) {
+      if (!bufferController.isClosed) {
+        bufferController.add(value);
+      }
+    },
+  );
+  late final _bufferingPercentageEmitter = ThrottledEmitter<double>(
+    configuration.positionUpdateInterval,
+    (value) {
+      if (!bufferingPercentageController.isClosed) {
+        bufferingPercentageController.add(value);
+      }
+    },
+  );
+
+  /// Hands out the throttled values held back, at a pause, the end of the file or a playback restart.
+  void _flushThrottled() {
+    _positionEmitter.flushPending();
+    _bufferEmitter.flushPending();
+    _bufferingPercentageEmitter.flushPending();
+  }
 
   /// Hooks run inside mpv's `on_preloaded` hook: the demuxer is open & `track-list` is known, but no
   /// decoders exist yet. mpv waits for them & this player's event loop is blocked meanwhile, so they
