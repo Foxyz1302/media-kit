@@ -11,6 +11,7 @@ import 'dart:isolate';
 
 import 'package:media_kit/ffi/ffi.dart';
 import 'package:media_kit/generated/libmpv/bindings.dart' as generated;
+import 'package:media_kit/src/player/native/core/initializer.dart';
 import 'package:media_kit/src/player/native/core/native_library.dart';
 
 /// {@template initializer_native_callable}
@@ -93,9 +94,17 @@ class InitializerNativeCallable {
     _guardianNow?.control.send(['render', ctx.address]);
   }
 
-  /// Hands [ctx] over for destruction: the guardian no longer destroys it when this isolate dies.
-  void release(Pointer<generated.mpv_handle> ctx) {
-    _guardianNow?.control.send(['remove', ctx.address]);
+  /// Hands [ctx] over to the guardian, which destroys it in a worker isolate; see [Initializer.destroy].
+  ///
+  /// One message: if this isolate dies at any point, [ctx] is destroyed exactly once.
+  Future<void> destroy(Pointer<generated.mpv_handle> ctx) {
+    final guardian = _guardianNow;
+    if (guardian == null) {
+      return terminateDestroyElsewhere(NativeLibrary.path, ctx.address);
+    }
+    final reply = ReceivePort();
+    guardian.control.send(['destroy', ctx.address, reply.sendPort]);
+    return reply.first.then((_) {});
   }
 
   void _callback(Pointer<generated.mpv_handle> ctx) {
@@ -168,7 +177,7 @@ class InitializerNativeCallable {
 class _Guardian {
   _Guardian(this.control, this.wakeup, this.wakeups);
 
-  /// Takes `['add', address]`, `['render', address]`, `['remove', address]` & `'exit'`.
+  /// Takes `['add', address]`, `['render', address]`, `['destroy', address, reply]` & `'exit'`.
   final SendPort control;
 
   /// The wakeup callback to give mpv.
@@ -181,13 +190,14 @@ class _Guardian {
 /// The guardian isolate: owns the `NativeCallable` mpv calls on new events & forwards each wakeup.
 ///
 /// It keeps the handles its owner created until the owner hands them over for destruction
-/// (`remove`). When the owner dies with handles left, it clears their wakeup callback & destroys
+/// (`destroy`, in a worker isolate, so the forwarding never waits for a destroy). When the owner dies with handles left, it clears their wakeup callback & destroys
 /// them, except the ones that may still have a render context: those only get `quit` & stay alive,
 /// because mpv aborts when a handle is destroyed before its render context (`mp_clients_destroy`).
 void _guardian(List<Object?> arguments) {
   final handshake = arguments[0] as SendPort;
   final owner = arguments[1] as SendPort;
-  final mpv = generated.MPV(DynamicLibrary.open(arguments[2] as String));
+  final libmpv = arguments[2] as String;
+  final mpv = generated.MPV(DynamicLibrary.open(libmpv));
   final wakeup = NativeCallable<Void Function(Pointer<Void>)>.listener(
     (Pointer<Void> ctx) => owner.send(ctx.address),
   );
@@ -201,8 +211,15 @@ void _guardian(List<Object?> arguments) {
         if (guarded.containsKey(address)) {
           guarded[address] = true;
         }
-      case ['remove', final int address]:
+      case ['destroy', final int address, final SendPort reply]:
         guarded.remove(address);
+        terminateDestroyElsewhere(libmpv, address).then(
+          (_) => reply.send(null),
+          onError: (Object exception) {
+            print(exception);
+            reply.send(null);
+          },
+        );
       case 'exit':
         for (final MapEntry(key: address, value: render) in guarded.entries) {
           final ctx = Pointer<generated.mpv_handle>.fromAddress(address);

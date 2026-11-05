@@ -188,7 +188,11 @@ class NativePlayer extends PlatformPlayer {
         _nativeWork.isEmpty &&
         (!isVideoControllerAttached || videoControllerCompleter.isCompleted);
     if (safe) {
-      _destroy(ctx);
+      try {
+        await _destroy(ctx).timeout(_disposeStepTimeout);
+      } on TimeoutException {
+        print('media_kit: NativePlayer: dispose: mpv_terminate_destroy still runs.');
+      }
     } else {
       // Something may still use the handle: a render context of a VideoController that hasn't finished
       // initializing (it may still create one), a release callback or event handler still running, a
@@ -211,23 +215,21 @@ class NativePlayer extends PlatformPlayer {
       // A VideoController that finished initializing after the release callbacks ran registered its own.
       await runReleaseCallbacks();
       await Future.wait(pendingReleaseCallbacks);
-      _destroy(ctx);
+      await _destroy(ctx);
     } catch (exception, stacktrace) {
       print(exception);
       print(stacktrace);
     }
   }
 
-  /// Destroys [ctx]. Nothing in this isolate can reach it afterwards: [ctx] reads nullptr.
-  void _destroy(Pointer<generated.mpv_handle> ctx) {
+  /// Destroys [ctx] in a worker isolate, right away. Nothing in this isolate can reach it afterwards:
+  /// [ctx] reads nullptr.
+  Future<void> _destroy(Pointer<generated.mpv_handle> ctx) async {
     if (this.ctx != ctx) {
       return;
     }
     this.ctx = nullptr;
-    Initializer(mpv).release(ctx);
-    Future.delayed(const Duration(seconds: 5), () {
-      mpv.mpv_terminate_destroy(ctx);
-    });
+    await Initializer(mpv).destroy(ctx);
   }
 
   /// Completes the requests whose replies won't come anymore, so their callers don't wait forever.

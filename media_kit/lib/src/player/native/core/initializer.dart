@@ -11,6 +11,7 @@ import 'package:media_kit/generated/libmpv/bindings.dart' as generated;
 import 'package:media_kit/src/player/native/core/execmem_restriction.dart';
 import 'package:media_kit/src/player/native/core/initializer_isolate.dart';
 import 'package:media_kit/src/player/native/core/initializer_native_callable.dart';
+import 'package:media_kit/src/player/native/core/native_library.dart';
 import 'package:media_kit/src/values.dart';
 
 /// {@template initializer}
@@ -76,15 +77,28 @@ class Initializer {
     }
   }
 
-  /// Takes [ctx] off the handles destroyed when this isolate dies, right before it's destroyed.
-  void release(Pointer<generated.mpv_handle> ctx) {
-    if (!usesIsolate) {
-      InitializerNativeCallable(mpv).release(ctx);
+  /// Destroys [ctx] with `mpv_terminate_destroy` in a worker isolate, so the blocking wait for mpv's
+  /// threads doesn't stall this one. Call it after [dispose] completed & mpv's render context, if any,
+  /// was freed. Completes once [ctx] is destroyed.
+  Future<void> destroy(Pointer<generated.mpv_handle> ctx) {
+    if (usesIsolate) {
+      return terminateDestroyElsewhere(NativeLibrary.path, ctx.address);
     }
+    return InitializerNativeCallable(mpv).destroy(ctx);
   }
 
   bool isMainIsolate() {
     final name = Isolate.current.debugName;
     return name == 'main';
   }
+}
+
+/// Runs `mpv_terminate_destroy` on the handle at [address] in a new isolate & completes once done.
+Future<void> terminateDestroyElsewhere(String libmpv, int address) {
+  return Isolate.run(
+    () => generated.MPV(DynamicLibrary.open(libmpv)).mpv_terminate_destroy(
+      Pointer<generated.mpv_handle>.fromAddress(address),
+    ),
+    debugName: 'media_kit: mpv_terminate_destroy',
+  );
 }
