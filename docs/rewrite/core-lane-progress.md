@@ -10,6 +10,8 @@ State on 2026-11-05: the lifecycle items for Starsync 1.5.0 are done, with no C 
 | `3965b5d1` | Destroy right after dispose, on a worker isolate, instead of 5 s later on the UI isolate. dispose completes once the handle is destroyed (bounded 10 s). |
 | `f2229cde` | The event-loop deadlock. `observeProperty` listeners and mpv hooks run outside the loop (hooks call `mpv_hook_continue` when done). User observers get ids ≥ 2^40 and `MPV_FORMAT_STRING` (E-6, E-8). The fallback bitrate file read runs outside the loop. `observeEvent` listeners are still awaited, because they borrow the `mpv_event`. |
 | `c6eec8cb` | A deferred destroy waits for the same event drain; a failed guardian spawn is retried. |
+| (COM fix) | Windows: the destroy thread joins COM's MTA. mpv creates the WASAPI hotplug (`audio-device-list`) on its core thread in the MTA but releases it, and calls `CoUninitialize`, on the destroying thread after the core thread exited (`ao_wasapi.c` `hotplug_uninit`). Outside the MTA: an access violation in `UnregisterEndpointNotificationCallback`, which crashed CI. On the Flutter UI thread, where the old 5 s timer ran, that `CoUninitialize` removes the UI thread's own COM init: a likely cause of Starsync's later Windows crashes (not confirmed on the app). |
+| (zone fix) | Events are delivered in the zone that created the player, not the guardian's. |
 
 ## Design: why no NativeFinalizer, and the guardian isolate
 - **mpv aborts** if a handle is destroyed while a render context is alive. Verified in mpv 0.41 `player/client.c`: `mp_destroy_client` → (last strong client) `mp_destroy` → `mp_clients_destroy`, which prints "Broken API use: mpv_render_context_free() not called." and calls `abort()`. So the handle is destroyed only after the release callbacks, and never blindly while a desktop VideoController may hold one.
@@ -28,7 +30,7 @@ State on 2026-11-05: the lifecycle items for Starsync 1.5.0 are done, with no C 
 - Linux stress (`media_kit_test/lib/teardown_stress.dart`, 1 lane, muted, hwdec auto, h264/hevc/vp9/av1 clips; sampler in `tmp/core/stress/run.sh`):
   - Release (guardian path), 200 iterations: PASS, 0 errors, 274 s. RSS plateaued at about 650–690 MiB and dropped to 445 MiB at the end. Threads were 50–53 during the run and 22 at the end; FDs were 190–195 during the run and 98 at the end. mpv `core` threads: 1 most of the time, at most 3 for single samples (probably queryDecoders' temporary handle), 0 at the end.
   - Debug (isolate path), 100 iterations: PASS, 0 errors. At the end: threads 23, FDs 97, 0 cores, RSS 605 MiB (debug JIT).
-- Windows: `ci.yml` dispatched on `core-rewrite`, see the run linked from the integration merge.
+- Windows CI (run 42013731546 on `core-rewrite`): `package:media_kit tests (Windows)` (freeKC DLL), `Windows`, `Windows (optional libs)` and `Windows (audio libs)` pass, as do the Linux, Web and Android jobs. The headless job hits its known 20-min timeout.
 
 ## Left
 - Owner killed during an in-flight `screenshot`/`setShuffle` `compute`: the guardian may destroy the handle under it. The fix is the async `screenshot-raw` and async `playlist` get from the FFI item below.
