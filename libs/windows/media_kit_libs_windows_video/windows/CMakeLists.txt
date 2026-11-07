@@ -248,6 +248,8 @@ set(ANGLE_ARCHIVE "${CMAKE_BINARY_DIR}/${ANGLE}")
 set(ANGLE_SRC "${CMAKE_BINARY_DIR}/ANGLE")
 set(ANGLE_INCLUDE_DIR "${ANGLE_SRC}/include")
 set(ANGLE_LIB_DIR "${ANGLE_SRC}/lib")
+set(ANGLE_LICENSES_DIR "${ANGLE_SRC}/LICENSES")
+set(ANGLE_LICENSES "${CMAKE_BINARY_DIR}/angle-licenses.txt")
 
 download_and_verify_sha256(
   "${ANGLE_URL}"
@@ -269,6 +271,10 @@ set(
   "${ANGLE_LIB_DIR}/vk_swiftshader_icd.json"
   "${ANGLE_LIB_DIR}/libEGL.dll.lib"
   "${ANGLE_LIB_DIR}/libGLESv2.dll.lib"
+  "${ANGLE_LICENSES_DIR}/ANGLE.txt"
+  "${ANGLE_LICENSES_DIR}/SwiftShader.txt"
+  "${ANGLE_LICENSES_DIR}/Vulkan-Loader.txt"
+  "${ANGLE_LICENSES_DIR}/Microsoft-Windows-SDK-License.rtf"
 )
 
 # Always recreate staging from the verified archive to prevent stale files.
@@ -321,6 +327,29 @@ foreach(ANGLE_REQUIRED_FILE IN LISTS ANGLE_REQUIRED_FILES)
   endif()
 endforeach()
 
+file(
+  WRITE
+  "${ANGLE_LICENSES}"
+  "libEGL.dll, libGLESv2.dll (ANGLE), vk_swiftshader.dll (SwiftShader), "
+  "vulkan-1.dll (Vulkan Loader) and d3dcompiler_47.dll (Windows SDK).\n"
+  "Binary: ${ANGLE_URL}\n"
+  "SHA-256: ${ANGLE_SHA256}\n"
+)
+foreach(
+  ANGLE_LICENSE_FILE
+  ANGLE.txt
+  SwiftShader.txt
+  Vulkan-Loader.txt
+  Microsoft-Windows-SDK-License.rtf
+)
+  file(READ "${ANGLE_LICENSES_DIR}/${ANGLE_LICENSE_FILE}" ANGLE_LICENSE_TEXT)
+  file(
+    APPEND
+    "${ANGLE_LICENSES}"
+    "\n==== ${ANGLE_LICENSE_FILE} ====\n\n${ANGLE_LICENSE_TEXT}"
+  )
+endforeach()
+
 # ------------------------------------------------------------------------------
 set(PLUGIN_NAME "media_kit_libs_windows_video_plugin")
 
@@ -359,6 +388,7 @@ set(
   media_kit_libs_windows_video_bundled_libraries
   "${LIBMPV_RUNTIME_LIBRARY}"
   "${LIBMPV_LICENSES}"
+  "${ANGLE_LICENSES}"
   "${ANGLE_LIB_DIR}/d3dcompiler_47.dll"
   "${ANGLE_LIB_DIR}/libEGL.dll"
   "${ANGLE_LIB_DIR}/libGLESv2.dll"
