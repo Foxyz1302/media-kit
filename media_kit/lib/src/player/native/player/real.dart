@@ -1793,7 +1793,7 @@ class NativePlayer extends PlatformPlayer {
       }
       if (prop.ref.name.cast<Utf8>().toDartString() == 'pause' &&
           prop.ref.format == generated.mpv_format.MPV_FORMAT_FLAG) {
-        final playing = prop.ref.data.cast<Int8>().value == 0;
+        final playing = prop.ref.data.cast<Int32>().value == 0;
         if (!playing) {
           _flushThrottled();
         }
@@ -1807,7 +1807,7 @@ class NativePlayer extends PlatformPlayer {
       if (prop.ref.name.cast<Utf8>().toDartString() == 'core-idle' &&
           prop.ref.format == generated.mpv_format.MPV_FORMAT_FLAG) {
         // Check for [isBufferingStateChangeAllowed] because `pause` causes `core-idle` to be fired.
-        final buffering = prop.ref.data.cast<Int8>().value == 1;
+        final buffering = prop.ref.data.cast<Int32>().value == 1;
         if (buffering) {
           if (isBufferingStateChangeAllowed) {
             state = state.copyWith(buffering: true);
@@ -1825,7 +1825,7 @@ class NativePlayer extends PlatformPlayer {
       }
       if (prop.ref.name.cast<Utf8>().toDartString() == 'paused-for-cache' &&
           prop.ref.format == generated.mpv_format.MPV_FORMAT_FLAG) {
-        final buffering = prop.ref.data.cast<Int8>().value == 1;
+        final buffering = prop.ref.data.cast<Int32>().value == 1;
         state = state.copyWith(buffering: buffering);
         if (!bufferingController.isClosed) {
           bufferingController.add(buffering);
@@ -2212,7 +2212,7 @@ class NativePlayer extends PlatformPlayer {
       }
       if (prop.ref.name.cast<Utf8>().toDartString() == 'eof-reached' &&
           prop.ref.format == generated.mpv_format.MPV_FORMAT_FLAG) {
-        final value = prop.ref.data.cast<Bool>().value;
+        final value = prop.ref.data.cast<Int32>().value != 0;
         if (value) {
           _flushThrottled();
           if (isPlayingStateChangeAllowed) {
@@ -2868,7 +2868,8 @@ class NativePlayer extends PlatformPlayer {
   }
 
   Future<void> _setPropertyFlag(String name, bool value) async {
-    final ptr = calloc<Bool>(1)..value = value;
+    // MPV_FORMAT_FLAG is a C int.
+    final ptr = calloc<Int32>(1)..value = value ? 1 : 0;
     await _setProperty(name, generated.mpv_format.MPV_FORMAT_FLAG, ptr.cast());
     calloc.free(ptr);
   }
