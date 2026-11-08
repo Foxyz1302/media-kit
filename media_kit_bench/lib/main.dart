@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:developer' as developer;
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:better_native_video_player/better_native_video_player.dart';
@@ -42,7 +43,23 @@ const _allClips = [
 // applied through the plugin's global config, so it never shares an app launch with `native`.
 // mkAutosync: mpv's --autosync=30 (smoothed A/V correction); mkNoAudio: aid=no (system-clock timing).
 // mkPosition100: PlayerConfiguration.positionUpdateInterval = 100 ms.
-enum BenchConfig { mkDefault, mkCopy, mkGpuMediacodec, mkEmbed, mkAutosync, mkNoAudio, mkPosition100, native, nativeTexture }
+// mkSwap1: mpv's swapchain-depth=1 (default 3).
+// ctlBlack / ctlImage: no player; a black screen, or a still image of the view's physical size drawn 1:1
+// (an Impeller texture, not an external one), each with the same plain & overlay windows.
+enum BenchConfig {
+  mkDefault,
+  mkCopy,
+  mkGpuMediacodec,
+  mkEmbed,
+  mkAutosync,
+  mkNoAudio,
+  mkPosition100,
+  mkSwap1,
+  native,
+  nativeTexture,
+  ctlBlack,
+  ctlImage,
+}
 
 const _clipsDefine = String.fromEnvironment('BENCH_CLIPS');
 const _configsDefine = String.fromEnvironment('BENCH_CONFIGS');
@@ -69,6 +86,11 @@ const _viewsDefine = String.fromEnvironment('BENCH_VIEWS');
 // BENCH_POSITION_LABEL=true: media_kit runs show a label rebuilt from player.stream.position, & count its
 // events in the plain window.
 const _positionLabel = bool.fromEnvironment('BENCH_POSITION_LABEL');
+// BENCH_BUFPROBE=true: MainActivity logs every image Flutter's ImageReaders acquire (per-frame work on the
+// main thread, so off by default).
+const _bufprobe = bool.fromEnvironment('BENCH_BUFPROBE');
+const _overlaySeconds = int.fromEnvironment('BENCH_OVERLAY_SECONDS', defaultValue: 5);
+const _benchChannel = MethodChannel('dev.foxyz.media_kit_bench/bench');
 const _version = 5;
 
 List<String> _csv(String s) => [for (final e in s.split(',')) if (e.trim().isNotEmpty) e.trim()];
@@ -76,7 +98,10 @@ List<String> _csv(String s) => [for (final e in s.split(',')) if (e.trim().isNot
 final List<String> _clips = _clipsDefine.isEmpty ? _allClips : _csv(_clipsDefine);
 // nativeTexture changes the plugin's global config, so it only runs when asked for explicitly.
 final List<BenchConfig> _configs = _configsDefine.isEmpty
-    ? [for (final c in BenchConfig.values) if (c != BenchConfig.nativeTexture) c]
+    ? [
+        for (final c in BenchConfig.values)
+          if (c != BenchConfig.nativeTexture && c != BenchConfig.ctlBlack && c != BenchConfig.ctlImage) c
+      ]
     : [for (final n in _csv(_configsDefine)) BenchConfig.values.byName(n)];
 final List<String> _passes = _passesDefine.isEmpty ? const ['portrait', 'landscape'] : _csv(_passesDefine);
 final MPVLogLevel _mpvLogLevel = MPVLogLevel.values.byName(_mpvLogDefine);
@@ -88,7 +113,7 @@ const _ttffTimeout = Duration(seconds: 20);
 const _motionTimeout = Duration(seconds: 20);
 const _motionThresholdSeconds = 0.2;
 const _plainWindow = Duration(seconds: 9);
-const _overlayWindow = Duration(seconds: 5);
+const _overlayWindow = Duration(seconds: _overlaySeconds);
 const _gap = Duration(seconds: 2);
 
 void main() {
@@ -193,6 +218,13 @@ class _AnimatedPhase {
 
 final _http = HttpClient();
 
+/// Every bench player is muted (volume 0) before anything is opened: the phone never plays audio.
+Future<Player> _mutedPlayer(PlayerConfiguration configuration) async {
+  final player = Player(configuration: configuration);
+  await player.setVolume(0);
+  return player;
+}
+
 /// Whether the engine runs Hybrid Composition++: the EnableHcpp flag, API 34+, Impeller Vulkan and the
 /// SurfaceControl swapchain. With it, every platform view create is routed to HCPP.
 Future<Object> _hcppActive() async {
@@ -289,6 +321,13 @@ class _BenchPageState extends State<BenchPage> with TickerProviderStateMixin {
     final view = WidgetsBinding.instance.platformDispatcher.views.first;
     final lastVsync = _frames.isEmpty ? null : _frames.last.vsyncUs;
     final hcpp = await _hcppActive();
+    if (_bufprobe) {
+      try {
+        await _benchChannel.invokeMethod('bufprobe');
+      } catch (e, st) {
+        debugPrint('bufprobe enable failed: $e\n$st');
+      }
+    }
     debugPrint('bench: HybridAndroidViewController.checkIfSupported() = $hcpp');
     await _post({
       'type': 'hello',
@@ -300,6 +339,8 @@ class _BenchPageState extends State<BenchPage> with TickerProviderStateMixin {
       'mpvLog': _mpvLogLevel.name,
       'animated': [for (final c in _animated) c.name],
       'views': _views,
+      'bufprobe': _bufprobe,
+      'overlaySeconds': _overlaySeconds,
       'linkTest': _linkTestClip,
       'hcppActive': hcpp,
       'refreshRate': view.display.refreshRate,
@@ -329,9 +370,12 @@ class _BenchPageState extends State<BenchPage> with TickerProviderStateMixin {
             _mini.value = _small ? 1 : 0;
             Map<String, dynamic> result;
             try {
-              result = cfg == BenchConfig.native || cfg == BenchConfig.nativeTexture
-                  ? await _runNative(clip, cfg, nativeId++)
-                  : await _runMediaKit(clip, cfg);
+              if ((cfg == BenchConfig.ctlBlack || cfg == BenchConfig.ctlImage) && clip != _clips.first) continue;
+              result = switch (cfg) {
+                BenchConfig.native || BenchConfig.nativeTexture => await _runNative(clip, cfg, nativeId++),
+                BenchConfig.ctlBlack || BenchConfig.ctlImage => await _runControl(cfg),
+                _ => await _runMediaKit(clip, cfg),
+              };
             } catch (e, st) {
               result = {
                 'ok': false,
@@ -385,7 +429,7 @@ class _BenchPageState extends State<BenchPage> with TickerProviderStateMixin {
     int maxLogs = 40,
     bool mountLater = false,
   }) async {
-    final player = Player(configuration: PlayerConfiguration(logLevel: logLevel));
+    final player = await _mutedPlayer(PlayerConfiguration(logLevel: logLevel));
     final np = player.platform as NativePlayer;
     final logs = <String>[];
     final sw = Stopwatch()..start();
@@ -505,20 +549,18 @@ class _BenchPageState extends State<BenchPage> with TickerProviderStateMixin {
         return {'pass': completed && s2.last[1] > 1.0, 'completed': completed, 'samplesNext': s2};
       },
     };
-    if (_checkSet == 'start') {
-      await _runStartChecks();
-      return;
-    }
-    if (_checkSet == 'start2') {
-      await _runStartChecks2();
-      return;
-    }
-    if (_checkSet == 'start4k') {
-      await _runStart4kChecks();
-      return;
-    }
-    if (_checkSet == 'budget') {
-      await _runBudgetChecks();
+    if (_checkSet.isNotEmpty) {
+      // A comma-separated list of sets, run in order in one launch.
+      for (final set in _csv(_checkSet)) {
+        await switch (set) {
+          'start' => _runStartChecks(),
+          'start2' => _runStartChecks2(),
+          'start4k' => _runStart4kChecks(),
+          'budget' => _runBudgetChecks(),
+          'churn' => _runChurnChecks(),
+          _ => throw ArgumentError('unknown BENCH_CHECK_SET $set'),
+        };
+      }
       return;
     }
     for (final entry in checks.entries) {
@@ -565,7 +607,7 @@ class _BenchPageState extends State<BenchPage> with TickerProviderStateMixin {
             ],
           );
       for (var i = 0; i < 7; i++) {
-        final p = Player(configuration: const PlayerConfiguration(logLevel: MPVLogLevel.warn));
+        final p = await _mutedPlayer(const PlayerConfiguration(logLevel: MPVLogLevel.warn));
         players.add(p);
         controllers.add(VideoController(p));
       }
@@ -578,7 +620,7 @@ class _BenchPageState extends State<BenchPage> with TickerProviderStateMixin {
         await p.open(Media('$_host/clips/$clip'), play: false);
       }
       await Future<void>.delayed(const Duration(seconds: 4));
-      final active = Player(configuration: const PlayerConfiguration(logLevel: MPVLogLevel.warn));
+      final active = await _mutedPlayer(const PlayerConfiguration(logLevel: MPVLogLevel.warn));
       final activeController = VideoController(active);
       players.add(active);
       controllers.add(activeController);
@@ -886,10 +928,12 @@ class _BenchPageState extends State<BenchPage> with TickerProviderStateMixin {
         BenchConfig.mkCopy => const VideoControllerConfiguration(vo: 'gpu', hwdec: 'mediacodec-copy'),
         BenchConfig.mkGpuMediacodec => const VideoControllerConfiguration(vo: 'gpu', hwdec: 'mediacodec'),
         BenchConfig.mkEmbed => const VideoControllerConfiguration(vo: 'mediacodec_embed', hwdec: 'mediacodec'),
-        BenchConfig.mkAutosync || BenchConfig.mkNoAudio || BenchConfig.mkPosition100 =>
+        BenchConfig.mkAutosync || BenchConfig.mkNoAudio || BenchConfig.mkPosition100 || BenchConfig.mkSwap1 =>
           const VideoControllerConfiguration(),
         BenchConfig.native ||
-        BenchConfig.nativeTexture =>
+        BenchConfig.nativeTexture ||
+        BenchConfig.ctlBlack ||
+        BenchConfig.ctlImage =>
           throw StateError('${cfg.name} is not a media_kit configuration'),
       };
 
@@ -922,8 +966,8 @@ class _BenchPageState extends State<BenchPage> with TickerProviderStateMixin {
   }
 
   Future<Map<String, dynamic>> _runMediaKit(String clip, BenchConfig cfg) async {
-    final player = Player(
-      configuration: PlayerConfiguration(
+    final player = await _mutedPlayer(
+      PlayerConfiguration(
         logLevel: _mpvLogLevel,
         positionUpdateInterval:
             cfg == BenchConfig.mkPosition100 ? const Duration(milliseconds: 100) : Duration.zero,
@@ -958,6 +1002,7 @@ class _BenchPageState extends State<BenchPage> with TickerProviderStateMixin {
     // Before the VideoController: its setup gates every Player call.
     if (cfg == BenchConfig.mkAutosync) await np.setProperty('autosync', '30');
     if (cfg == BenchConfig.mkNoAudio) await np.setProperty('aid', 'no');
+    if (cfg == BenchConfig.mkSwap1) await np.setProperty('swapchain-depth', '1');
     final controller = VideoController(player, configuration: _videoConfig(cfg));
     setState(() {
       _status = '$clip · ${cfg.name}';
@@ -1091,6 +1136,239 @@ class _BenchPageState extends State<BenchPage> with TickerProviderStateMixin {
     return result;
   }
 
+  /// A control run without a player (ctlBlack / ctlImage): the same plain & overlay windows over a black
+  /// screen, or over a still image of the view's physical size drawn 1:1, which Impeller samples like any
+  /// image instead of an imported HardwareBuffer.
+  Future<Map<String, dynamic>> _runControl(BenchConfig cfg) async {
+    ui.Image? image;
+    if (cfg == BenchConfig.ctlImage) {
+      final view = WidgetsBinding.instance.platformDispatcher.views.first;
+      final w = view.physicalSize.width.toInt();
+      final h = view.physicalSize.height.toInt();
+      final pixels = Uint8List(w * h * 4);
+      for (var y = 0; y < h; y++) {
+        for (var x = 0; x < w; x++) {
+          final i = (y * w + x) * 4;
+          pixels[i] = (x * 255 ~/ w);
+          pixels[i + 1] = (y * 255 ~/ h);
+          pixels[i + 2] = ((x ^ y) & 0xff);
+          pixels[i + 3] = 255;
+        }
+      }
+      final done = Completer<ui.Image>();
+      ui.decodeImageFromPixels(pixels, w, h, ui.PixelFormat.rgba8888, done.complete);
+      image = await done.future;
+    }
+    setState(() {
+      _status = cfg.name;
+      _overlay = false;
+      _video = image == null
+          ? const ColoredBox(color: Colors.black)
+          : RawImage(image: image, fit: BoxFit.fill, filterQuality: FilterQuality.low);
+    });
+    await WidgetsBinding.instance.endOfFrame;
+    await Future<void>.delayed(const Duration(seconds: 1));
+    final result = <String, dynamic>{
+      'runStartEpochMs': DateTime.now().millisecondsSinceEpoch,
+      if (image != null) 'imageSize': '${image.width}x${image.height}',
+    };
+    final t0 = developer.Timeline.now;
+    await Future<void>.delayed(const Duration(seconds: 3));
+    final t1 = developer.Timeline.now;
+    setState(() => _overlay = true);
+    await Future<void>.delayed(_overlayWindow);
+    final t2 = developer.Timeline.now;
+    setState(() {
+      _overlay = false;
+      _video = null;
+    });
+    await WidgetsBinding.instance.endOfFrame;
+    image?.dispose();
+    result['ok'] = true;
+    result['runEndEpochMs'] = DateTime.now().millisecondsSinceEpoch;
+    await Future<void>.delayed(_gap);
+    result['plain'] = _windowStats(t0, t1);
+    result['overlay'] = _windowStats(t1, t2);
+    return result;
+  }
+
+  /// This process's resident memory, thread count & open file descriptors.
+  Map<String, int> _procStats() {
+    final out = <String, int>{};
+    for (final line in File('/proc/self/status').readAsLinesSync()) {
+      if (line.startsWith('VmRSS:')) out['rssKb'] = int.parse(line.split(RegExp(r'\s+'))[1]);
+      if (line.startsWith('Threads:')) out['threads'] = int.parse(line.split(RegExp(r'\s+'))[1]);
+    }
+    out['fds'] = Directory('/proc/self/fd').listSync(followLinks: false).length;
+    return out;
+  }
+
+  /// Pager-like churn (BENCH_CHECK_SET=churn). Three pages live at a time (previous, current, next), all full
+  /// size, side by side as in a PageView; the next page is opened paused, the current one plays. Each switch
+  /// disposes the page that falls out without awaiting it (like State.dispose), after a dwell that is
+  /// sometimes shorter than a start. Then a burst of players disposed mid-open, a settle, & one fresh
+  /// player as a health check (time to first frame, hwdec, rate). Process stats before & after, the UI
+  /// isolate's longest timer gap & Flutter frame stats over the churn.
+  Future<void> _runChurnChecks() async {
+    const phases = {
+      'vp9': ['vp9_1440p60.webm'],
+      'mixed': ['h264_1080p60.mp4', 'hevc_2160p60.mp4', 'vp9_1440p60.webm', 'h264_2160p60.mp4'],
+    };
+    const dwellsMs = [120, 900, 250, 2500, 60, 1500, 400];
+    const pagesPerPhase = 14;
+    final before = _procStats();
+    var maxGapMs = 0;
+    final gapSw = Stopwatch()..start();
+    var lastTick = 0;
+    final monitor = Timer.periodic(const Duration(milliseconds: 8), (_) {
+      final now = gapSw.elapsedMilliseconds;
+      maxGapMs = math.max(maxGapMs, now - lastTick);
+      lastTick = now;
+    });
+    final errors = <String>[];
+    final disposeMs = <int>[];
+    var disposesPending = 0;
+    final t0 = developer.Timeline.now;
+    final churnSw = Stopwatch()..start();
+    for (final phase in phases.entries) {
+      final pages = <int, ({Player p, VideoController c, Stopwatch sw, String clip})>{};
+      final firstFrameMs = <int, int>{};
+      final records = <Map<String, dynamic>>[];
+      Future<void> create(int i) async {
+        final clip = phase.value[i % phase.value.length];
+        final p = await _mutedPlayer(const PlayerConfiguration(logLevel: MPVLogLevel.warn));
+        final c = VideoController(p);
+        final sw = Stopwatch()..start();
+        pages[i] = (p: p, c: c, sw: sw, clip: clip);
+        unawaited(c.waitUntilFirstFrameRendered.then((_) => firstFrameMs[i] = sw.elapsedMilliseconds));
+        unawaited(p.open(Media('$_host/clips/$clip'), play: false).catchError((Object e) {
+          if (errors.length < 20) errors.add('open $i: $e');
+        }));
+      }
+
+      void drop(int i) {
+        final page = pages.remove(i);
+        if (page == null) return;
+        final sw = Stopwatch()..start();
+        disposesPending++;
+        unawaited(page.p.dispose().timeout(const Duration(seconds: 15)).then((_) {
+          disposeMs.add(sw.elapsedMilliseconds);
+        }, onError: (Object e) {
+          if (errors.length < 20) errors.add('dispose $i: $e');
+        }).whenComplete(() => disposesPending--));
+      }
+
+      Widget pager(int current) => LayoutBuilder(
+            builder: (context, box) => Stack(
+              clipBehavior: Clip.hardEdge,
+              children: [
+                for (final e in pages.entries)
+                  Positioned(
+                    left: (e.key - current) * box.maxWidth,
+                    top: 0,
+                    width: box.maxWidth,
+                    height: box.maxHeight,
+                    child: Video(controller: e.value.c, controls: NoVideoControls, fit: BoxFit.contain),
+                  ),
+              ],
+            ),
+          );
+
+      for (var i = 0; i < pagesPerPhase; i++) {
+        try {
+          if (!pages.containsKey(i)) await create(i);
+          if (i + 1 < pagesPerPhase) await create(i + 1);
+          drop(i - 2);
+          setState(() {
+            _status = 'churn ${phase.key} $i';
+            _video = pager(i);
+          });
+          final switchMs = pages[i]!.sw.elapsedMilliseconds;
+          await pages[i]!.p.play();
+          final dwell = dwellsMs[i % dwellsMs.length];
+          await Future<void>.delayed(Duration(milliseconds: dwell));
+          final np = pages[i]!.p.platform as NativePlayer;
+          records.add({
+            'page': i,
+            'clip': pages[i]!.clip,
+            'dwellMs': dwell,
+            'becameCurrentMs': switchMs,
+            'firstFrameMs': firstFrameMs[i],
+            'hwdec': await _prop(np, 'hwdec-current'),
+            'timePos': _r2(await _timePos(np)),
+          });
+        } catch (e, st) {
+          if (errors.length < 20) errors.add('page $i: $e ${st.toString().split('\n').take(3).join(' | ')}');
+        }
+      }
+      setState(() => _video = null);
+      await WidgetsBinding.instance.endOfFrame;
+      for (final i in pages.keys.toList()) {
+        drop(i);
+      }
+      await _post({'type': 'check', 'version': _version, 'name': 'churn.${phase.key}', 'pages': records});
+      await Future<void>.delayed(const Duration(seconds: 1));
+    }
+    // Burst: open & dispose after 0 / 30 / 100 ms, mounted.
+    final burst = <int>[];
+    for (var i = 0; i < 12; i++) {
+      final p = await _mutedPlayer(const PlayerConfiguration(logLevel: MPVLogLevel.warn));
+      final c = VideoController(p);
+      setState(() => _video = Video(controller: c, controls: NoVideoControls));
+      unawaited(p.open(Media('$_host/clips/${i.isEven ? 'h264_2160p60.mp4' : 'vp9_1440p60.webm'}')).catchError((Object e) {
+        if (errors.length < 20) errors.add('burst open $i: $e');
+      }));
+      await Future<void>.delayed(Duration(milliseconds: const [0, 30, 100][i % 3]));
+      setState(() => _video = null);
+      final sw = Stopwatch()..start();
+      try {
+        await p.dispose().timeout(const Duration(seconds: 15));
+        burst.add(sw.elapsedMilliseconds);
+      } catch (e) {
+        if (errors.length < 20) errors.add('burst dispose $i: $e');
+      }
+    }
+    final churnS = churnSw.elapsedMilliseconds / 1000;
+    final t1 = developer.Timeline.now;
+    monitor.cancel();
+    await _waitFor(() async => disposesPending == 0, const Duration(seconds: 20));
+    final pendingAfter = disposesPending;
+    await Future<void>.delayed(const Duration(seconds: 6));
+    final after = _procStats();
+    // Health: one fresh VP9 1440p60 player after all of that.
+    final health = await _check('churn health', (p, np, c) async {
+      final sw = Stopwatch()..start();
+      await p.open(Media('$_host/clips/vp9_1440p60.webm'));
+      await c.waitUntilFirstFrameRendered.timeout(const Duration(seconds: 15));
+      final ttff = sw.elapsedMilliseconds;
+      await _waitFor(() async => await _timePos(np) > 0.5, const Duration(seconds: 10));
+      final p0 = await _timePos(np);
+      await Future<void>.delayed(const Duration(seconds: 3));
+      final p1 = await _timePos(np);
+      return {'ttffMs': ttff, 'rate': _r2((p1 - p0) / 3)};
+    });
+    await Future<void>.delayed(const Duration(seconds: 3));
+    final end = _procStats();
+    disposeMs.sort();
+    burst.sort();
+    await _post({
+      'type': 'check',
+      'version': _version,
+      'name': 'churn.summary',
+      'churnSeconds': churnS,
+      'procBefore': before,
+      'procAfterSettle': after,
+      'procAfterHealth': end,
+      'disposesPendingAfter20s': pendingAfter,
+      'disposeMs': {'n': disposeMs.length, 'p50': _pct([for (final d in disposeMs) d.toDouble()], .5), 'max': disposeMs.isEmpty ? 0 : disposeMs.last},
+      'burstDisposeMs': burst,
+      'uiMaxTimerGapMs': maxGapMs,
+      'frames': _windowStats(t0, t1),
+      'errors': errors,
+      'health': health,
+    });
+  }
+
   Future<Map<String, dynamic>> _runNative(String clip, BenchConfig cfg, int id) async {
     final c = NativeVideoPlayerController(
       id: id,
@@ -1120,6 +1398,7 @@ class _BenchPageState extends State<BenchPage> with TickerProviderStateMixin {
       _video = NativeVideoPlayer(controller: c);
     });
     await c.initialize();
+    await c.setVolume(0);
     final result = <String, dynamic>{
       'runStartEpochMs': DateTime.now().millisecondsSinceEpoch,
       'ttffMeaning': 'load() -> first playing state (the plugin\'s own startup metric)',

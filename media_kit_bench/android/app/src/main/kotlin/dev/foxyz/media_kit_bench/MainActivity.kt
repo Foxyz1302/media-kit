@@ -10,7 +10,9 @@ import android.os.Looper
 import android.util.Log
 import android.view.WindowManager
 import io.flutter.embedding.android.FlutterActivity
+import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.embedding.engine.renderer.FlutterRenderer
+import io.flutter.plugin.common.MethodChannel
 import java.util.WeakHashMap
 
 class MainActivity : FlutterActivity() {
@@ -20,10 +22,23 @@ class MainActivity : FlutterActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        if (Build.VERSION.SDK_INT >= 31) handler.post(::hookReaders)
     }
 
-    // Bench-only probe: every image Flutter's ImageReaderSurfaceProducer acquires is logged as
+    override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+        super.configureFlutterEngine(flutterEngine)
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "dev.foxyz.media_kit_bench/bench")
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "bufprobe" -> {
+                        if (Build.VERSION.SDK_INT >= 31) handler.post(::hookReaders)
+                        result.success(null)
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+    }
+
+    // Bench-only probe (BENCH_BUFPROBE): every image Flutter's ImageReaderSurfaceProducer acquires is logged as
     // "bufprobe <reader> <arrival uptime ns> <image timestamp ns> <HardwareBuffer id>", then handed to
     // Flutter exactly as its own listener does.
     @SuppressLint("NewApi")
