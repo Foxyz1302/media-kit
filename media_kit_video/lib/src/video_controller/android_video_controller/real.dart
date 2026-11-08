@@ -486,21 +486,44 @@ class AndroidVideoController extends PlatformVideoController {
       return _controllers[handle]!;
     }
 
+    // Creation:
+    final controller = AndroidVideoController._(player, configuration);
+    try {
+      await controller._setUp(handle);
+    } on _PlayerDisposed {
+      await controller._dispose(notifiers: false);
+    } on AssertionError {
+      // The player calls' only assertion: "[Player] has been disposed", once Player.dispose started.
+      await controller._dispose(notifiers: false);
+    }
+    return controller;
+  }
+
+  /// Throws [_PlayerDisposed] once [Player.dispose] has started: [create] stops there & releases what it
+  /// made, & the [VideoController] gets this output, already disposed.
+  void _checkPlayer() {
+    if (platform.disposed) {
+      throw const _PlayerDisposed();
+    }
+  }
+
+  Future<void> _setUp(int handle) async {
+    _checkPlayer();
     // In case no video-decoders are found, this means media_kit_libs_***_audio is being used.
     // Thus, --vid=no is required to prevent libmpv from trying to decode video (otherwise bad things may happen).
     //
     // Search for common H264 decoder to check if video support is available.
     final decoders = await queryDecoders(handle);
     if (!decoders.contains('h264')) {
+      await _dispose(notifiers: false);
       throw UnsupportedError(
         '[VideoController] is not available.'
         ' '
         'Please use media_kit_libs_***_video instead of media_kit_libs_***_audio.',
       );
     }
-
-    // Creation:
-    final controller = AndroidVideoController._(player, configuration);
+    _checkPlayer();
+    final controller = this;
 
     // Register [_dispose] for execution upon [Player.dispose].
     player.platform?.release.add(controller._dispose);
@@ -521,6 +544,8 @@ class AndroidVideoController extends PlatformVideoController {
         waitForInitialization: false,
       );
       controller._observesRestart = true;
+    } on AssertionError {
+      rethrow;
     } catch (exception, stacktrace) {
       debugPrint(
         'media_kit: playback-restart is observed elsewhere; waitUntilFirstFrameRendered completes '
@@ -528,6 +553,7 @@ class AndroidVideoController extends PlatformVideoController {
       );
     }
 
+    _checkPlayer();
     // Store the [VideoController] in the [_controllers].
     _controllers[handle] = controller;
 
@@ -535,6 +561,7 @@ class AndroidVideoController extends PlatformVideoController {
       'handle': handle.toString(),
     });
 
+    _checkPlayer();
     await controller.setProperties({
       // It is necessary to set vo=null here to avoid SIGSEGV, --wid must be assigned before vo=gpu is set.
       'vo': 'null',
@@ -548,9 +575,6 @@ class AndroidVideoController extends PlatformVideoController {
       'sub-scale-with-window': 'yes',
       'hwdec-codecs': 'h264,hevc,mpeg4,mpeg2video,vp8,vp9,av1',
     });
-
-    // Return the [PlatformVideoController].
-    return controller;
   }
 
   /// Sets the required size of the video output.
@@ -567,14 +591,21 @@ class AndroidVideoController extends PlatformVideoController {
   }
 
   /// Disposes the instance. Releases allocated resources back to the system.
-  Future<void> _dispose() async {
+  /// Without [notifiers] (a [create] that stopped because the player is being disposed), [id], [rect] &
+  /// [wid] stay usable for the [VideoController] that still attaches its listeners to them.
+  Future<void> _dispose({bool notifiers = true}) async {
+    if (_disposed) {
+      return;
+    }
     _disposed = true;
     _settle?.cancel();
     _views.clear();
     _lastViews = [];
-    super.dispose();
-    wid.dispose();
     wid.removeListener(widListener);
+    if (notifiers) {
+      super.dispose();
+      wid.dispose();
+    }
     platform.onPreloadedHooks.remove(_onPreloaded);
     final budget = _budget;
     if (budget != null) {
@@ -645,4 +676,9 @@ class AndroidVideoController extends PlatformVideoController {
         debugPrint(stacktrace.toString());
       }
     });
+}
+
+/// [AndroidVideoController.create] found the player being disposed.
+class _PlayerDisposed implements Exception {
+  const _PlayerDisposed();
 }
