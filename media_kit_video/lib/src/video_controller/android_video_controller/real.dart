@@ -6,12 +6,14 @@
 
 import 'dart:async';
 import 'dart:collection';
+import 'dart:ffi' show Pointer;
 import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
+import 'package:media_kit/generated/libmpv/bindings.dart' show mpv_event, mpv_event_id;
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/src/utils/query_decoders.dart';
 import 'package:media_kit_video/src/video_controller/hardware_decoder_budget.dart';
@@ -358,6 +360,26 @@ class AndroidVideoController extends PlatformVideoController {
     return null;
   }
 
+  /// Whether [_onPlaybackRestart] observes mpv's `playback-restart`.
+  bool _observesRestart = false;
+
+  /// Whether the first [VideoParams] checked that `mediacodec_embed` has a hardware decoder.
+  bool _checkedEmbedDecoder = false;
+
+  /// mpv's `playback-restart`: the first frame after a load or a seek has gone to the video output. Only a
+  /// restart while a Surface is attached completes [waitUntilFirstFrameRendered]: [_onPreloaded] attaches
+  /// it before the decoders exist, & a later attach ([widListener]) re-creates the video chain with a
+  /// refresh seek, whose restart comes after the attach. [VideoParams] come with the decoder's output
+  /// format, before any frame is drawn.
+  Future<void> _onPlaybackRestart(Pointer<mpv_event> _) async {
+    if (_disposed ||
+        _attachedWid == null ||
+        waitUntilFirstFrameRenderedCompleter.isCompleted) {
+      return;
+    }
+    waitUntilFirstFrameRenderedCompleter.complete();
+  }
+
   /// [StreamSubscription] for listening to video [Rect].
   StreamSubscription<VideoParams>? videoParamsSubscription;
 
@@ -407,10 +429,13 @@ class AndroidVideoController extends PlatformVideoController {
           );
         }
 
-        if (waitUntilFirstFrameRenderedCompleter.isCompleted) {
+        if (!_observesRestart && !waitUntilFirstFrameRenderedCompleter.isCompleted) {
+          waitUntilFirstFrameRenderedCompleter.complete();
+        }
+        if (_checkedEmbedDecoder) {
           return;
         }
-        waitUntilFirstFrameRenderedCompleter.complete();
+        _checkedEmbedDecoder = true;
 
         if (configuration.vo == 'mediacodec_embed') {
           final hwdec = await platform.getProperty(
@@ -489,6 +514,19 @@ class AndroidVideoController extends PlatformVideoController {
       controller.platform.onUnloadHooks.add(budget.onUnload);
     }
     controller.platform.onPreloadedHooks.add(controller._onPreloaded);
+    try {
+      await controller.platform.observeEvent(
+        mpv_event_id.MPV_EVENT_PLAYBACK_RESTART.value,
+        controller._onPlaybackRestart,
+        waitForInitialization: false,
+      );
+      controller._observesRestart = true;
+    } catch (exception, stacktrace) {
+      debugPrint(
+        'media_kit: playback-restart is observed elsewhere; waitUntilFirstFrameRendered completes '
+        'on the video size: $exception\n$stacktrace',
+      );
+    }
 
     // Store the [VideoController] in the [_controllers].
     _controllers[handle] = controller;
