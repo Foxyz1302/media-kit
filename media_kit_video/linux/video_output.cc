@@ -377,7 +377,7 @@ VideoOutput* video_output_new(FlTextureRegistrar* texture_registrar,
                       int block_for_target_time = 0;
                       mpv_render_param params[]{
                           {MPV_RENDER_PARAM_SW_SIZE, size},
-                          {MPV_RENDER_PARAM_SW_FORMAT, (void*)"rgb0"},
+                          {MPV_RENDER_PARAM_SW_FORMAT, (void*)"rgba"},
                           {MPV_RENDER_PARAM_SW_STRIDE, &pitch},
                           {MPV_RENDER_PARAM_SW_POINTER, self->pixel_buffer},
                           {MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME,
