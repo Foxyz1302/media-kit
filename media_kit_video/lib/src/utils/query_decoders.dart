@@ -7,6 +7,7 @@
 import 'dart:collection';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:synchronized/synchronized.dart';
 
@@ -43,7 +44,7 @@ Future<HashSet<String>> queryDecoders(Player player) {
         }
       }
     } on FormatException catch (exception) {
-      print('media_kit: queryDecoders: $exception');
+      debugPrint('media_kit: queryDecoders: $exception');
     }
     return _decoders;
   });
