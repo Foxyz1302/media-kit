@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <exception>
+#include <utility>
 
 // Limit the frame size to 1080p in software rendering.
 // This is for performance reasons & to avoid allocating too much memory.
@@ -56,6 +57,28 @@ VideoDimensions GetVideoDimensions(mpv_handle* handle) {
     return {dw, dh};
   }
   return {dh, dw};
+}
+
+// Scales |width| x |height| down, keeping the aspect ratio, so that it fits in
+// the S/W pixel buffer. Portrait sizes use the transposed bounds.
+void FitSoftwareSize(int64_t& width, int64_t& height) {
+  if (width <= 0 || height <= 0) {
+    return;
+  }
+  int64_t max_width = SW_RENDERING_MAX_WIDTH;
+  int64_t max_height = SW_RENDERING_MAX_HEIGHT;
+  if (height > width) {
+    std::swap(max_width, max_height);
+  }
+  if (width <= max_width && height <= max_height) {
+    return;
+  }
+  double scale = (std::min)(static_cast<double>(max_width) / width,
+                            static_cast<double>(max_height) / height);
+  width =
+      std::clamp(static_cast<int64_t>(width * scale), int64_t{1}, max_width);
+  height =
+      std::clamp(static_cast<int64_t>(height * scale), int64_t{1}, max_height);
 }
 
 }  // namespace
@@ -128,7 +151,9 @@ VideoOutput::VideoOutput(int64_t handle,
       // Allocate a "large enough" buffer ahead of time.
       pixel_buffer_ =
           std::make_unique<uint8_t[]>(SW_RENDERING_PIXEL_BUFFER_SIZE);
-      Resize(width_.value_or(1), height_.value_or(1));
+      int64_t width = width_.value_or(1), height = height_.value_or(1);
+      FitSoftwareSize(width, height);
+      Resize(width, height);
       mpv_render_param params[] = {
           {MPV_RENDER_PARAM_API_TYPE, MPV_RENDER_API_TYPE_SW},
           {MPV_RENDER_PARAM_INVALID, nullptr},
@@ -151,6 +176,11 @@ VideoOutput::VideoOutput(int64_t handle,
 }
 
 VideoOutput::~VideoOutput() {
+  // mpv calls the update callback under the lock this takes, so once it
+  // returns no |NotifyRender| runs on this object or posts tasks for it.
+  if (render_context_ != nullptr) {
+    mpv_render_context_set_update_callback(render_context_, nullptr, nullptr);
+  }
   destroyed_ = true;
   auto promise = std::promise<void>();
   // Runs on the thread pool once every task posted before it has run, so that
@@ -240,10 +270,10 @@ void VideoOutput::Render() {
           static_cast<int32_t>(pixel_buffer_textures_.at(texture_id_)->width),
           static_cast<int32_t>(pixel_buffer_textures_.at(texture_id_)->height),
       };
-      auto pitch = 4 * size[0];
+      size_t pitch = 4 * static_cast<size_t>(size[0]);
       mpv_render_param params[]{
           {MPV_RENDER_PARAM_SW_SIZE, size},
-          {MPV_RENDER_PARAM_SW_FORMAT, "rgb0"},
+          {MPV_RENDER_PARAM_SW_FORMAT, "rgba"},
           {MPV_RENDER_PARAM_SW_STRIDE, &pitch},
           {MPV_RENDER_PARAM_SW_POINTER, pixel_buffer_.get()},
           {MPV_RENDER_PARAM_INVALID, nullptr},
@@ -262,46 +292,24 @@ void VideoOutput::Render() {
 void VideoOutput::SetTextureUpdateCallback(
     std::function<void(int64_t, int64_t, int64_t)> callback) {
   texture_update_callback_ = callback;
-  texture_update_callback_(texture_id_, GetVideoWidth(), GetVideoHeight());
+  int64_t width = 0, height = 0;
+  GetVideoSize(width, height);
+  texture_update_callback_(texture_id_, width, height);
 }
 
 void VideoOutput::SetSize(std::optional<int64_t> width,
                           std::optional<int64_t> height) {
   thread_pool_ref_->Post([&, width, height]() {
-    if (width.has_value()) {
-      // H/W
-      if (surface_manager_ != nullptr) {
-        width_ = width.value();
-      }
-      // S/W
-      if (pixel_buffer_ != nullptr) {
-        // Limit width if software rendering is being used.
-        width_ = std::clamp(width.value(), static_cast<int64_t>(0),
-                            static_cast<int64_t>(SW_RENDERING_MAX_WIDTH));
-      }
-    } else {
-      width_ = std::nullopt;
-    }
-    if (height.has_value()) {
-      // H/W
-      if (surface_manager_ != nullptr) {
-        height_ = height.value();
-      }
-      // S/W
-      if (pixel_buffer_ != nullptr) {
-        // Limit height if software rendering is being used.
-        height_ = std::clamp(height.value(), static_cast<int64_t>(0),
-                             static_cast<int64_t>(SW_RENDERING_MAX_HEIGHT));
-      }
-    } else {
-      height_ = std::nullopt;
-    }
+    // S/W: the size is fitted into the pixel buffer in |GetVideoSize|.
+    width_ = width;
+    height_ = height;
   });
 }
 
 void VideoOutput::CheckAndResize() {
   // Check if a new texture with different dimensions is needed.
-  auto required_width = GetVideoWidth(), required_height = GetVideoHeight();
+  int64_t required_width = 0, required_height = 0;
+  GetVideoSize(required_width, required_height);
   if (required_width < 1 || required_height < 1) {
     // Invalid.
     return;
@@ -462,46 +470,15 @@ void VideoOutput::ReportDeviceLost() {
   texture_update_callback_(0, 0, 0);
 }
 
-int64_t VideoOutput::GetVideoWidth() {
-  // Fixed width.
-  if (width_) {
-    return width_.value();
+void VideoOutput::GetVideoSize(int64_t& width, int64_t& height) {
+  // Video resolution dependent size, unless fixed.
+  VideoDimensions video{};
+  if (!width_ || !height_) {
+    video = GetVideoDimensions(handle_);
   }
-  // Video resolution dependent width.
-  const auto [width, height] = GetVideoDimensions(handle_);
-
+  width = width_.value_or(video.width);
+  height = height_.value_or(video.height);
   if (pixel_buffer_ != nullptr) {
-    // Make sure |width| & |height| fit between |SW_RENDERING_MAX_WIDTH| &
-    // |SW_RENDERING_MAX_HEIGHT| while maintaining aspect-ratio.
-    if (width >= SW_RENDERING_MAX_WIDTH) {
-      return SW_RENDERING_MAX_WIDTH;
-    }
-    if (height >= SW_RENDERING_MAX_HEIGHT) {
-      return width * SW_RENDERING_MAX_HEIGHT / height;
-    }
+    FitSoftwareSize(width, height);
   }
-
-  return width;
-}
-
-int64_t VideoOutput::GetVideoHeight() {
-  // Fixed height.
-  if (height_) {
-    return height_.value();
-  }
-  // Video resolution dependent height.
-  const auto [width, height] = GetVideoDimensions(handle_);
-
-  if (pixel_buffer_ != NULL) {
-    // Make sure |width| & |height| fit between |SW_RENDERING_MAX_WIDTH| &
-    // |SW_RENDERING_MAX_HEIGHT| while maintaining aspect-ratio.
-    if (height >= SW_RENDERING_MAX_HEIGHT) {
-      return SW_RENDERING_MAX_HEIGHT;
-    }
-    if (width >= SW_RENDERING_MAX_WIDTH) {
-      return height * SW_RENDERING_MAX_WIDTH / width;
-    }
-  }
-
-  return height;
 }
