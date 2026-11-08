@@ -176,6 +176,11 @@ VideoOutput::VideoOutput(int64_t handle,
 }
 
 VideoOutput::~VideoOutput() {
+  // mpv calls the update callback under the lock this takes, so once it
+  // returns no |NotifyRender| runs on this object or posts tasks for it.
+  if (render_context_ != nullptr) {
+    mpv_render_context_set_update_callback(render_context_, nullptr, nullptr);
+  }
   destroyed_ = true;
   auto promise = std::promise<void>();
   // Runs on the thread pool once every task posted before it has run, so that
