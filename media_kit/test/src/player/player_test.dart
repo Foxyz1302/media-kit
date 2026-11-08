@@ -30,6 +30,8 @@ void main() {
 
     // For preventing video driver & audio driver initialization errors in unit-tests.
     NativePlayer.test = true;
+    // No audio server on Linux CI: the audio hotplug can hang mpv there.
+    NativePlayer.observeAudioDevices = !UniversalPlatform.isLinux;
     // For preventing "DOMException: play() failed because the user didn't interact with the document first." in unit-tests.
     WebPlayer.test = true;
   });
@@ -917,7 +919,7 @@ void main() {
     });
 
     addTearDown(player.dispose);
-  }, skip: UniversalPlatform.isWeb);
+  }, skip: UniversalPlatform.isWeb || UniversalPlatform.isLinux);
   test('player-set-audio-device', () async {
     final player = Player();
 
@@ -949,7 +951,7 @@ void main() {
     }
 
     addTearDown(player.dispose);
-  }, skip: UniversalPlatform.isWeb);
+  }, skip: UniversalPlatform.isWeb || UniversalPlatform.isLinux);
   test('player-set-audio-device', () async {
     final player = Player();
 

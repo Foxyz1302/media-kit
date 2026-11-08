@@ -2712,11 +2712,8 @@ class NativePlayer extends PlatformPlayer {
         'cache-buffering-state': generated.mpv_format.MPV_FORMAT_DOUBLE,
         'audio-params': generated.mpv_format.MPV_FORMAT_NODE,
         'audio-bitrate': generated.mpv_format.MPV_FORMAT_DOUBLE,
-        // Reading these makes mpv open the audio hotplug (PipeWire, PulseAudio, ...). Tests use
-        // ao=null & have no audio server: libpipewire's failure path can then hang mpv's core in
-        // pw_thread_loop_stop when the handle is destroyed (seen on CI).
-        if (!test) 'audio-device': generated.mpv_format.MPV_FORMAT_NODE,
-        if (!test) 'audio-device-list': generated.mpv_format.MPV_FORMAT_NODE,
+        if (observeAudioDevices) 'audio-device': generated.mpv_format.MPV_FORMAT_NODE,
+        if (observeAudioDevices) 'audio-device-list': generated.mpv_format.MPV_FORMAT_NODE,
         'video-params': generated.mpv_format.MPV_FORMAT_NODE,
         'track-list': generated.mpv_format.MPV_FORMAT_NODE,
         'eof-reached': generated.mpv_format.MPV_FORMAT_FLAG,
@@ -3135,6 +3132,13 @@ class NativePlayer extends PlatformPlayer {
   /// Whether the [NativePlayer] is initialized for unit-testing.
   @visibleForTesting
   static bool test = false;
+
+  /// Whether new players observe `audio-device` & `audio-device-list`. Reading them makes mpv open
+  /// the audio hotplug (PipeWire, PulseAudio, ...). Tests without an audio server turn it off: on
+  /// CI, libpipewire's failure path hung mpv's core in `pw_thread_loop_stop` when the handle was
+  /// destroyed.
+  @visibleForTesting
+  static bool observeAudioDevices = true;
 }
 
 // --------------------------------------------------

@@ -4,6 +4,8 @@ import 'package:media_kit/media_kit.dart';
 void initializeHeadless() {
   MediaKit.ensureInitialized();
   NativePlayer.test = true;
+  // No audio server on CI: the audio hotplug can hang mpv there.
+  NativePlayer.observeAudioDevices = false;
 }
 
 /// Creates a [Player] that decodes on the CPU only (`hwdec=no`): headless suites never touch the GPU.
