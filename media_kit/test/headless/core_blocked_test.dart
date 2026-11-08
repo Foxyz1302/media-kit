@@ -108,6 +108,7 @@ void main() {
     await player.open(Media(TestMedia.audio), play: false);
     await native.setProperty('media-kit-no-such-option', 'no');
     await native.command(['no-such-command']);
+    await player.stop();
     await Future<void>.delayed(const Duration(milliseconds: 200));
     await subscription.cancel();
     final errors = lines.where((line) => line.contains('error: ')).toList();
@@ -120,6 +121,11 @@ void main() {
       errors.where((line) => line.contains('event:')),
       isEmpty,
       reason: 'a failed request is logged again, without its name, by the event loop',
+    );
+    expect(
+      errors.where((line) => line.contains('http-header-fields')),
+      isEmpty,
+      reason: 'on_unload failed to reset the HTTP headers',
     );
   });
 }

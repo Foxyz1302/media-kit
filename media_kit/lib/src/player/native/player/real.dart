@@ -2488,25 +2488,12 @@ class NativePlayer extends PlatformPlayer {
   /// `on_unload`: resets what [_onLoad] set.
   Future<void> _onUnload() async {
     try {
-      // Set http-header-fields as [generated.mpv_format.MPV_FORMAT_NONE] [generated.mpv_node].
-      final value = calloc<generated.mpv_node>();
-      value.ref.format = generated.mpv_format.MPV_FORMAT_NONE;
-      try {
-        await _setProperty(
-          'http-header-fields',
-          generated.mpv_format.MPV_FORMAT_NODE,
-          value.cast(),
-        );
-      } finally {
-        calloc.free(value);
-      }
-      // Set start & end position as none.
-      if (_alive) {
-        await Future.wait([
-          _setPropertyString('start', 'none'),
-          _setPropertyString('end', 'none'),
-        ]);
-      }
+      // An empty string clears the list; mpv refuses an MPV_FORMAT_NONE node for it.
+      await Future.wait([
+        _setPropertyString('http-header-fields', ''),
+        _setPropertyString('start', 'none'),
+        _setPropertyString('end', 'none'),
+      ]);
     } catch (exception, stacktrace) {
       print(exception);
       print(stacktrace);
