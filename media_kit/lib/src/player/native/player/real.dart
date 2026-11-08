@@ -8,6 +8,7 @@ import 'dart:async';
 import 'dart:collection';
 import 'dart:ffi';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:image/image.dart';
@@ -2690,6 +2691,13 @@ class NativePlayer extends PlatformPlayer {
         }
       }
 
+      // The hooks: on_load & on_unload for the HTTP headers, start & end of a [Media];
+      // on_preloaded for [onPreloadedHooks], e.g. attaching a video output before the decoders are
+      // created. mpv_hook_add waits for mpv's core, so it runs in another isolate: the core can be
+      // stuck, e.g. opening the audio device for audio-device-list.
+      final libmpv = NativeLibrary.path;
+      await _withHandleElsewhere((ctx) => _addHooksElsewhere(libmpv, ctx));
+
       // Observe the properties to update the state & feed event stream.
       <String, generated.mpv_format>{
         'pause': generated.mpv_format.MPV_FORMAT_FLAG,
@@ -2734,18 +2742,6 @@ class NativePlayer extends PlatformPlayer {
         mpv.mpv_request_log_messages(_live, min.cast());
         calloc.free(min);
       }
-
-      // Add libmpv hooks for supporting custom HTTP headers in [Media].
-      final load = 'on_load'.toNativeUtf8();
-      final unload = 'on_unload'.toNativeUtf8();
-      mpv.mpv_hook_add(_live, 0, load.cast(), 0);
-      mpv.mpv_hook_add(_live, 0, unload.cast(), 0);
-      calloc.free(load);
-      calloc.free(unload);
-      // [onPreloadedHooks]: e.g. attaching a video output before the decoders are created.
-      final preloaded = 'on_preloaded'.toNativeUtf8();
-      mpv.mpv_hook_add(_live, 0, preloaded.cast(), 0);
-      calloc.free(preloaded);
 
       if (Initializer(mpv).usesIsolate) {
         // Hot-restart cleanup: the handles of the isolate based event loop survive the isolate.
@@ -3139,6 +3135,23 @@ class NativePlayer extends PlatformPlayer {
 }
 
 // --------------------------------------------------
+
+/// Runs [_addHooks] in a new isolate. Top-level: the closure sent to it captures nothing else.
+Future<void> _addHooksElsewhere(String libmpv, int ctx) => Isolate.run(
+      () => _addHooks(libmpv, ctx),
+      debugName: 'media_kit: mpv_hook_add',
+    );
+
+/// Adds the hooks [NativePlayer] handles to the handle at [ctx].
+void _addHooks(String libmpv, int ctx) {
+  final mpv = generated.MPV(DynamicLibrary.open(libmpv));
+  final handle = Pointer<generated.mpv_handle>.fromAddress(ctx);
+  for (final name in const ['on_load', 'on_unload', 'on_preloaded']) {
+    final native = name.toNativeUtf8();
+    mpv.mpv_hook_add(handle, 0, native.cast(), 0);
+    calloc.free(native);
+  }
+}
 
 class _ScreenshotData {
   final int ctx;
