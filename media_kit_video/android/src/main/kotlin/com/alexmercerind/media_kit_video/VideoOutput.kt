@@ -94,6 +94,7 @@ internal class VideoOutput(
 
     private var id = 0L
     private var wid = 0L
+    private var disposed = false
     private val surfaceProducer = textureRegistryReference.createSurfaceProducer()
     private val lock = Any()
 
@@ -101,19 +102,24 @@ internal class VideoOutput(
         surfaceProducer.setCallback(this)
     }
 
+    /**
+     * The SurfaceProducer owns its Surface: release the producer, never the Surface it hands out (an
+     * ImageReader-backed producer's getSurface() may even create a new Surface just to release it). mpv is
+     * told the Surface is gone (wid = 0) before the producer goes, and nothing reads the released producer
+     * or runs on this output afterwards.
+     */
     fun dispose() {
         synchronized(lock) {
-            try {
-                surfaceProducer.surface.release()
-            } catch (error: Throwable) {
-                Log.e(TAG, "dispose", error)
+            if (disposed) {
+                return
             }
+            disposed = true
+            detachSurface(0, 0)
             try {
                 surfaceProducer.release()
             } catch (error: Throwable) {
                 Log.e(TAG, "dispose", error)
             }
-            onSurfaceCleanup()
         }
     }
 
@@ -123,6 +129,9 @@ internal class VideoOutput(
 
     private fun setSurfaceSize(width: Int, height: Int, force: Boolean) {
         synchronized(lock) {
+            if (disposed) {
+                return
+            }
             try {
                 if (!force && surfaceProducer.width == width && surfaceProducer.height == height) {
                     return
@@ -137,10 +146,13 @@ internal class VideoOutput(
 
     override fun onSurfaceAvailable() {
         synchronized(lock) {
+            if (disposed) {
+                return
+            }
             Log.i(TAG, "onSurfaceAvailable")
             id = surfaceProducer.id()
             // Every resize lands here with a new Surface. Release the previous global reference later,
-            // like onSurfaceCleanup does, once mpv has switched to the new --wid.
+            // like detachSurface does, once mpv has switched to the new --wid.
             if (wid != 0L) {
                 val previous = wid
                 handler.postDelayed({ deleteGlobalObjectRef(previous) }, 5000L)
@@ -157,18 +169,21 @@ internal class VideoOutput(
 
     override fun onSurfaceCleanup() {
         synchronized(lock) {
-            Log.i(TAG, "onSurfaceCleanup")
-            textureUpdateCallback.onTextureUpdate(
-                id,
-                0,
-                surfaceProducer.width,
-                surfaceProducer.height,
-            )
-            if (wid != 0L) {
-                val widReference = wid
-                handler.postDelayed({ deleteGlobalObjectRef(widReference) }, 5000L)
-                wid = 0L
+            if (disposed) {
+                return
             }
+            Log.i(TAG, "onSurfaceCleanup")
+            detachSurface(surfaceProducer.width, surfaceProducer.height)
+        }
+    }
+
+    /** Tells mpv its Surface is gone (wid = 0) & releases the global reference once mpv has moved on. */
+    private fun detachSurface(width: Int, height: Int) {
+        textureUpdateCallback.onTextureUpdate(id, 0, width, height)
+        if (wid != 0L) {
+            val widReference = wid
+            handler.postDelayed({ deleteGlobalObjectRef(widReference) }, 5000L)
+            wid = 0L
         }
     }
 }
