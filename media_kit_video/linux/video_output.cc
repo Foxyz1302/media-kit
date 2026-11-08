@@ -372,7 +372,7 @@ VideoOutput* video_output_new(FlTextureRegistrar* texture_registrar,
                     gint64 height = video_output_get_height(self);
                     if (width > 0 && height > 0) {
                       gint32 size[]{(gint32)width, (gint32)height};
-                      gint32 pitch = 4 * (gint32)width;
+                      size_t pitch = 4 * (size_t)width;
                       // On the main thread: no wait for the display time
                       int block_for_target_time = 0;
                       mpv_render_param params[]{
