@@ -152,6 +152,21 @@ class NativePlayer extends PlatformPlayer {
       }
     }
 
+    // Android: mpv lets go of the video output & the Surface before the release callbacks, which
+    // release the Surface. Otherwise mpv still renders into an abandoned BufferQueue (force-window
+    // keeps the output alive), & the escape hatches the plugin would detach with already throw.
+    // Desktop keeps its order: the render context is freed in the release callbacks.
+    if (Platform.isAndroid && initialized && _alive) {
+      try {
+        for (final property in const [('vid', 'no'), ('vo', 'null'), ('wid', '0')]) {
+          await _setPropertyString(property.$1, property.$2)
+              .timeout(_disposeStepTimeout);
+        }
+      } catch (exception) {
+        print('media_kit: NativePlayer: dispose: detach the video output: $exception');
+      }
+    }
+
     _positionEmitter.cancel();
     _bufferEmitter.cancel();
     _bufferingPercentageEmitter.cancel();
