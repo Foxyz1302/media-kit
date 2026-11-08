@@ -2712,8 +2712,11 @@ class NativePlayer extends PlatformPlayer {
         'cache-buffering-state': generated.mpv_format.MPV_FORMAT_DOUBLE,
         'audio-params': generated.mpv_format.MPV_FORMAT_NODE,
         'audio-bitrate': generated.mpv_format.MPV_FORMAT_DOUBLE,
-        'audio-device': generated.mpv_format.MPV_FORMAT_NODE,
-        'audio-device-list': generated.mpv_format.MPV_FORMAT_NODE,
+        // Reading these makes mpv open the audio hotplug (PipeWire, PulseAudio, ...). Tests use
+        // ao=null & have no audio server: libpipewire's failure path can then hang mpv's core in
+        // pw_thread_loop_stop when the handle is destroyed (seen on CI).
+        if (!test) 'audio-device': generated.mpv_format.MPV_FORMAT_NODE,
+        if (!test) 'audio-device-list': generated.mpv_format.MPV_FORMAT_NODE,
         'video-params': generated.mpv_format.MPV_FORMAT_NODE,
         'track-list': generated.mpv_format.MPV_FORMAT_NODE,
         'eof-reached': generated.mpv_format.MPV_FORMAT_FLAG,
