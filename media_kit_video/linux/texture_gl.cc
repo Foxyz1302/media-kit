@@ -458,8 +458,13 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
   g_mutex_lock(&self->mutex);
   VideoOutput* video_output = self->video_output;
   if (video_output != NULL) {
-    gint32 required_width = (guint32)video_output_get_width(video_output);
-    gint32 required_height = (guint32)video_output_get_height(video_output);
+    gint64 output_width = 0, output_height = 0;
+    video_output_get_size(video_output, &output_width, &output_height);
+    if (output_width > G_MAXINT32 || output_height > G_MAXINT32) {
+      output_width = output_height = 0;
+    }
+    gint32 required_width = (gint32)output_width;
+    gint32 required_height = (gint32)output_height;
     if (required_width > 0 && required_height > 0) {
       texture_gl_render(self, video_output, required_width, required_height);
     }

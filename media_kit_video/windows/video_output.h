@@ -94,9 +94,9 @@ class VideoOutput {
 
   void Resize(int64_t required_width, int64_t required_height);
 
-  int64_t GetVideoWidth();
-
-  int64_t GetVideoHeight();
+  // Reads width & height together, so that both belong to the same
+  // video-out-params.
+  void GetVideoSize(int64_t& width, int64_t& height);
 
   // Tells Dart, once, that the texture can no longer show a picture: the
   // texture update callback gets the ID 0, which is never given otherwise.
