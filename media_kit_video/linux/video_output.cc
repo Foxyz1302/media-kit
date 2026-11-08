@@ -368,8 +368,8 @@ VideoOutput* video_output_new(FlTextureRegistrar* texture_registrar,
                       return FALSE;
                     }
                     g_mutex_lock(&self->mutex);
-                    gint64 width = video_output_get_width(self);
-                    gint64 height = video_output_get_height(self);
+                    gint64 width = 0, height = 0;
+                    video_output_get_size(self, &width, &height);
                     if (width > 0 && height > 0) {
                       gint32 size[]{(gint32)width, (gint32)height};
                       size_t pitch = 4 * (size_t)width;
@@ -425,9 +425,8 @@ void video_output_set_texture_update_callback(
 }
 
 void video_output_set_size(VideoOutput* self, gint64 width, gint64 height) {
-  // Ideally, a mutex should be used here & |video_output_get_width| +
-  // |video_output_get_height|. However, that is throwing everything into a
-  // deadlock. Flutter itself seems to have some synchronization mechanism in
+  // Ideally, a mutex should be used here & |video_output_get_size|. However,
+  // that is throwing everything into a deadlock. Flutter itself seems to have some synchronization mechanism in
   // rendering & platform channels AFAIK.
 
   // H/W
@@ -442,10 +441,10 @@ void video_output_set_size(VideoOutput* self, gint64 width, gint64 height) {
           self->texture_registrar, FL_TEXTURE(self->texture_gl));
     }
   }
-  // S/W
+  // S/W: the size is fitted into the pixel buffer in |video_output_get_size|
   if (self->texture_sw) {
-    self->width = CLAMP(width, 0, SW_RENDERING_MAX_WIDTH);
-    self->height = CLAMP(height, 0, SW_RENDERING_MAX_HEIGHT);
+    self->width = width;
+    self->height = height;
   }
 }
 
@@ -508,54 +507,39 @@ static void video_output_get_video_size(VideoOutput* self,
   *height = rotate == 0 || rotate == 180 ? dh : dw;
 }
 
-gint64 video_output_get_width(VideoOutput* self) {
-  // Fixed width.
-  if (self->width) {
-    return self->width;
+// Scales |width| x |height| down, keeping the aspect ratio, so that it fits in
+// the S/W pixel buffer. Portrait sizes use the transposed bounds.
+static void video_output_fit_sw_size(gint64* width, gint64* height) {
+  if (*width <= 0 || *height <= 0) {
+    return;
   }
-
-  // Video resolution dependent width.
-  gint64 width = 0;
-  gint64 height = 0;
-  video_output_get_video_size(self, &width, &height);
-
-  if (self->texture_sw != NULL) {
-    // Make sure |width| & |height| fit between |SW_RENDERING_MAX_WIDTH| &
-    // |SW_RENDERING_MAX_HEIGHT| while maintaining aspect ratio.
-    if (width >= SW_RENDERING_MAX_WIDTH) {
-      return SW_RENDERING_MAX_WIDTH;
-    }
-    if (height >= SW_RENDERING_MAX_HEIGHT) {
-      return width / height * SW_RENDERING_MAX_HEIGHT;
-    }
+  gint64 max_width = SW_RENDERING_MAX_WIDTH;
+  gint64 max_height = SW_RENDERING_MAX_HEIGHT;
+  if (*height > *width) {
+    max_width = SW_RENDERING_MAX_HEIGHT;
+    max_height = SW_RENDERING_MAX_WIDTH;
   }
-
-  return width;
+  if (*width <= max_width && *height <= max_height) {
+    return;
+  }
+  gdouble scale =
+      MIN((gdouble)max_width / *width, (gdouble)max_height / *height);
+  *width = CLAMP((gint64)(*width * scale), 1, max_width);
+  *height = CLAMP((gint64)(*height * scale), 1, max_height);
 }
 
-gint64 video_output_get_height(VideoOutput* self) {
-  // Fixed height.
+void video_output_get_size(VideoOutput* self, gint64* width, gint64* height) {
   if (self->width) {
-    return self->height;
+    // Fixed size.
+    *width = self->width;
+    *height = self->height;
+  } else {
+    // Video resolution dependent size.
+    video_output_get_video_size(self, width, height);
   }
-
-  // Video resolution dependent height.
-  gint64 width = 0;
-  gint64 height = 0;
-  video_output_get_video_size(self, &width, &height);
-
   if (self->texture_sw != NULL) {
-    // Make sure |width| & |height| fit between |SW_RENDERING_MAX_WIDTH| &
-    // |SW_RENDERING_MAX_HEIGHT| while maintaining aspect ratio.
-    if (height >= SW_RENDERING_MAX_HEIGHT) {
-      return SW_RENDERING_MAX_HEIGHT;
-    }
-    if (width >= SW_RENDERING_MAX_WIDTH) {
-      return height / width * SW_RENDERING_MAX_WIDTH;
-    }
+    video_output_fit_sw_size(width, height);
   }
-
-  return height;
 }
 
 gint64 video_output_get_texture_id(VideoOutput* self) {
@@ -578,8 +562,8 @@ gboolean video_output_get_gpu_rendering(VideoOutput* self) {
 void video_output_notify_texture_update(VideoOutput* self) {
   g_atomic_int_set(&self->has_frame, 1);
   gint64 id = video_output_get_texture_id(self);
-  gint64 width = video_output_get_width(self);
-  gint64 height = video_output_get_height(self);
+  gint64 width = 0, height = 0;
+  video_output_get_size(self, &width, &height);
   gpointer context = self->texture_update_callback_context;
   if (self->texture_update_callback != NULL) {
     self->texture_update_callback(id, width, height, context);
