@@ -465,7 +465,7 @@ class AndroidVideoController extends PlatformVideoController {
     // Thus, --vid=no is required to prevent libmpv from trying to decode video (otherwise bad things may happen).
     //
     // Search for common H264 decoder to check if video support is available.
-    final decoders = await queryDecoders(handle);
+    final decoders = await queryDecoders(player);
     if (!decoders.contains('h264')) {
       throw UnsupportedError(
         '[VideoController] is not available.'
