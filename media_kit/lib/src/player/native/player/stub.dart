@@ -15,4 +15,8 @@ class NativePlayer extends PlatformPlayer {
   /// Whether the [NativePlayer] is initialized for unit-testing.
   @visibleForTesting
   static bool test = false;
+
+  /// Whether new players observe the audio devices.
+  @visibleForTesting
+  static bool observeAudioDevices = true;
 }

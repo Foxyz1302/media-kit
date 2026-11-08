@@ -174,20 +174,9 @@ VideoOutput* video_output_new(FlTextureRegistrar* texture_registrar,
   }
   self->configuration.enable_hardware_acceleration = TRUE;
 #endif
-  mpv_set_option_string(self->handle, "video-sync", "audio");
-  // Causes frame drops with `pulse` audio output. (SlotSun/dart_simple_live#42)
-  // mpv_set_option_string(self->handle, "video-timing-offset", "0");
-  // Rendering does not wait for a frame's display time (Flutter's raster
-  // thread or the main thread would be held), so a frame shows when Flutter
-  // next draws, as early as mpv hands it over: 20 ms early here rather than
-  // mpv's 50 ms. A value the app set before stays; the old timing is
-  // setProperty('video-timing-offset', '0.05').
-  gchar* timing_offset =
-      mpv_get_property_string(self->handle, "video-timing-offset");
-  if (timing_offset == NULL || g_ascii_strtod(timing_offset, NULL) == 0.05) {
-    mpv_set_option_string(self->handle, "video-timing-offset", "0.02");
-  }
-  mpv_free(timing_offset);
+  // video-sync & video-timing-offset are set by NativeVideoController
+  // through libmpv's asynchronous API: a synchronous call here, on the
+  // platform thread, waits for mpv's core, which can be stuck.
   gboolean hardware_acceleration_supported = FALSE;
   // Why an output is drawn in S/W, said in the log
   const gchar* software_reason = "hardware acceleration is off";

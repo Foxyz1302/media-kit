@@ -164,7 +164,7 @@ class NativeVideoController extends PlatformVideoController {
     // Thus, --vid=no is required to prevent libmpv from trying to decode video (otherwise bad things may happen).
     //
     // Search for common H264 decoder to check if video support is available.
-    final decoders = await queryDecoders(handle);
+    final decoders = await queryDecoders(player);
     if (!decoders.contains('h264')) {
       throw UnsupportedError(
         '[VideoController] is not available.'
@@ -188,6 +188,25 @@ class NativeVideoController extends PlatformVideoController {
 
     // Store the [NativeVideoController] in the [_controllers].
     _controllers[handle] = controller;
+
+    if (Platform.isLinux) {
+      // Set here rather than in the native VideoOutput: a synchronous libmpv call on the platform
+      // thread waits for mpv's core, which can be stuck (e.g. opening an audio device).
+      //
+      // Rendering does not wait for a frame's display time (Flutter's raster thread or the main thread
+      // would be held), so a frame shows when Flutter next draws, as early as mpv hands it over: 20 ms
+      // early here rather than mpv's 50 ms. A value the app set before stays; the old timing is
+      // setProperty('video-timing-offset', '0.05').
+      final offset = await controller.platform.getProperty(
+        'video-timing-offset',
+        waitForInitialization: false,
+      );
+      await controller.setProperties({
+        'video-sync': 'audio',
+        if (offset.isEmpty || double.tryParse(offset) == 0.05)
+          'video-timing-offset': '0.02',
+      });
+    }
 
     await controller.setProperties({
       'vo': configuration.vo!,

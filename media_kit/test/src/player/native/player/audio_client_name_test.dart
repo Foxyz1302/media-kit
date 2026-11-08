@@ -13,6 +13,8 @@ void main() {
     MediaKit.ensureInitialized();
     // For preventing video driver & audio driver initialization errors in unit-tests.
     NativePlayer.test = true;
+    // No audio server on Linux CI: the audio hotplug can hang mpv there.
+    NativePlayer.observeAudioDevices = !UniversalPlatform.isLinux;
   });
 
   Future<String> audioClientName(Player player) async {

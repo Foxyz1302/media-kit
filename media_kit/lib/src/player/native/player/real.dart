@@ -8,6 +8,7 @@ import 'dart:async';
 import 'dart:collection';
 import 'dart:ffi';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:image/image.dart';
@@ -61,13 +62,17 @@ void nativeEnsureInitialized({String? libmpv}) {
       mpv.mpv_set_wakeup_callback(reference.cast(), nullptr, nullptr);
     }
 
-    // Now it's safe to send quit; mpv won't try to notify Dart anymore.
+    // Now it's safe to send quit; mpv won't try to notify Dart anymore. Asynchronously: a synchronous
+    // command waits for mpv's core, which may be stuck (e.g. opening an audio device).
     final cmd = 'quit'.toNativeUtf8();
+    final args = calloc<Pointer<Utf8>>(2);
+    args[0] = cmd;
     try {
       for (final reference in references) {
-        mpv.mpv_command_string(reference.cast(), cmd.cast());
+        mpv.mpv_command_async(reference.cast(), 0, args.cast());
       }
     } finally {
+      calloc.free(args);
       calloc.free(cmd);
     }
   });
@@ -145,6 +150,21 @@ class NativePlayer extends PlatformPlayer {
         await _stop(notify: false).timeout(_disposeStepTimeout);
       } catch (exception) {
         print('media_kit: NativePlayer: dispose: stop: $exception');
+      }
+    }
+
+    // Android: mpv lets go of the video output & the Surface before the release callbacks, which
+    // release the Surface. Otherwise mpv still renders into an abandoned BufferQueue (force-window
+    // keeps the output alive), & the escape hatches the plugin would detach with already throw.
+    // Desktop keeps its order: the render context is freed in the release callbacks.
+    if (Platform.isAndroid && initialized && _alive) {
+      try {
+        for (final property in const [('vid', 'no'), ('vo', 'null'), ('wid', '0')]) {
+          await _setPropertyString(property.$1, property.$2)
+              .timeout(_disposeStepTimeout);
+        }
+      } catch (exception) {
+        print('media_kit: NativePlayer: dispose: detach the video output: $exception');
       }
     }
 
@@ -239,11 +259,18 @@ class NativePlayer extends PlatformPlayer {
       ..._setPropertyRequests.values,
       ..._commandRequests.values,
     ];
+    final gets = [..._getPropertyRequests.values];
     _setPropertyRequests.clear();
     _commandRequests.clear();
+    _getPropertyRequests.clear();
     for (final completer in pending) {
       if (!completer.isCompleted) {
         completer.complete(generated.mpv_error.MPV_ERROR_UNINITIALIZED.value);
+      }
+    }
+    for (final completer in gets) {
+      if (!completer.isCompleted) {
+        completer.complete(null);
       }
     }
   }
@@ -1390,24 +1417,34 @@ class NativePlayer extends PlatformPlayer {
     await _setPropertyString(property, value);
   }
 
-  /// Sets [property] synchronously. Use this inside [onPreloadedHooks]: mpv waits for the hook, & the
-  /// asynchronous API would wait for a reply event that the blocked event loop cannot deliver.
+  /// Sets [property] without waiting for mpv. mpv applies it in order with the other calls; a
+  /// subsequent [getProperty] reads the new value.
+  ///
+  /// Inside a hook ([onLoadHooks], [onPreloadedHooks], [onUnloadHooks]), mpv continues only once
+  /// the value is applied: e.g. a video output attached in [onPreloadedHooks] exists before mpv
+  /// creates the decoders.
+  ///
+  /// It never blocks the calling isolate: a synchronous libmpv call waits for mpv's core, which can
+  /// be stuck for many seconds (e.g. opening an audio device).
   void setPropertySync(String property, String value) {
     if (_disposing) {
       throw AssertionError('[Player] has been disposed');
     }
-    final name = property.toNativeUtf8();
-    final data = value.toNativeUtf8();
-    try {
-      _logError(
-        mpv.mpv_set_property_string(_live, name.cast(), data.cast()),
-        'setPropertySync($property, $value)',
-      );
-    } finally {
-      calloc.free(name);
-      calloc.free(data);
+    if (!_alive) {
+      throw AssertionError('[Player] has been disposed');
     }
+    final done = _setPropertyString(property, value).catchError(
+      (Object exception, StackTrace stacktrace) {
+        print(exception);
+        print(stacktrace);
+      },
+    );
+    _unawaitedSets.add(done);
+    done.whenComplete(() => _unawaitedSets.remove(done));
   }
+
+  /// The [setPropertySync] calls whose value mpv hasn't applied yet.
+  final Set<Future<void>> _unawaitedSets = <Future<void>>{};
 
   /// Retrieves the value of a property from the internal libmpv instance of this [Player].
   /// Please use this method only if you know what you are doing, existing methods in [Player] implementation are suited for the most use cases.
@@ -1428,20 +1465,7 @@ class NativePlayer extends PlatformPlayer {
       await _ready();
     }
 
-    final name = property.toNativeUtf8();
-    try {
-      final value = mpv.mpv_get_property_string(_live, name.cast());
-      if (value != nullptr) {
-        try {
-          return value.cast<Utf8>().toDartString();
-        } finally {
-          mpv.mpv_free(value.cast());
-        }
-      }
-      return '';
-    } finally {
-      calloc.free(name);
-    }
+    return await _getPropertyString(property) ?? '';
   }
 
   /// Observes property for the internal libmpv instance of this [Player].
@@ -1676,6 +1700,26 @@ class NativePlayer extends PlatformPlayer {
         completer.complete(event.ref.error);
       }
     }
+    if (event.ref.event_id ==
+        generated.mpv_event_id.MPV_EVENT_GET_PROPERTY_REPLY) {
+      final completer = _getPropertyRequests.remove(event.ref.reply_userdata);
+      if (completer == null) {
+        print(
+          'Warning: Received MPV_EVENT_GET_PROPERTY_REPLY with unregistered ID ${event.ref.reply_userdata}',
+        );
+      } else {
+        String? value;
+        final prop = event.ref.data.cast<generated.mpv_event_property>();
+        if (event.ref.error >= 0 &&
+            prop != nullptr &&
+            prop.ref.format == generated.mpv_format.MPV_FORMAT_STRING &&
+            prop.ref.data != nullptr) {
+          final string = prop.ref.data.cast<Pointer<Utf8>>().value;
+          value = string == nullptr ? null : string.toDartString();
+        }
+        completer.complete(value);
+      }
+    }
     if (event.ref.event_id == generated.mpv_event_id.MPV_EVENT_COMMAND_REPLY) {
       final completer = _commandRequests.remove(event.ref.reply_userdata);
       if (completer == null) {
@@ -1702,10 +1746,10 @@ class NativePlayer extends PlatformPlayer {
       return;
     }
 
-    _logError(
-      event.ref.error,
-      'event:${event.ref.event_id} ${event.ref.data.cast<Uint8>()}',
-    );
+    // A reply's error was logged by the call that waited for it, with the property or command.
+    if (!_replyEvents.contains(event.ref.event_id)) {
+      _logError(event.ref.error, 'event:${event.ref.event_id.name}');
+    }
 
     if (event.ref.event_id == generated.mpv_event_id.MPV_EVENT_FILE_LOADED) {
       _awaitingFile = false;
@@ -1765,7 +1809,7 @@ class NativePlayer extends PlatformPlayer {
       }
       if (prop.ref.name.cast<Utf8>().toDartString() == 'pause' &&
           prop.ref.format == generated.mpv_format.MPV_FORMAT_FLAG) {
-        final playing = prop.ref.data.cast<Int8>().value == 0;
+        final playing = prop.ref.data.cast<Int32>().value == 0;
         if (!playing) {
           _flushThrottled();
         }
@@ -1779,7 +1823,7 @@ class NativePlayer extends PlatformPlayer {
       if (prop.ref.name.cast<Utf8>().toDartString() == 'core-idle' &&
           prop.ref.format == generated.mpv_format.MPV_FORMAT_FLAG) {
         // Check for [isBufferingStateChangeAllowed] because `pause` causes `core-idle` to be fired.
-        final buffering = prop.ref.data.cast<Int8>().value == 1;
+        final buffering = prop.ref.data.cast<Int32>().value == 1;
         if (buffering) {
           if (isBufferingStateChangeAllowed) {
             state = state.copyWith(buffering: true);
@@ -1797,7 +1841,7 @@ class NativePlayer extends PlatformPlayer {
       }
       if (prop.ref.name.cast<Utf8>().toDartString() == 'paused-for-cache' &&
           prop.ref.format == generated.mpv_format.MPV_FORMAT_FLAG) {
-        final buffering = prop.ref.data.cast<Int8>().value == 1;
+        final buffering = prop.ref.data.cast<Int32>().value == 1;
         state = state.copyWith(buffering: buffering);
         if (!bufferingController.isClosed) {
           bufferingController.add(buffering);
@@ -2184,7 +2228,7 @@ class NativePlayer extends PlatformPlayer {
       }
       if (prop.ref.name.cast<Utf8>().toDartString() == 'eof-reached' &&
           prop.ref.format == generated.mpv_format.MPV_FORMAT_FLAG) {
-        final value = prop.ref.data.cast<Bool>().value;
+        final value = prop.ref.data.cast<Int32>().value != 0;
         if (value) {
           _flushThrottled();
           if (isPlayingStateChangeAllowed) {
@@ -2353,21 +2397,24 @@ class NativePlayer extends PlatformPlayer {
         case 'on_load':
           await _runHooks(onLoadHooks);
           if (_alive) {
-            _onLoad();
+            await _onLoad();
           }
         case 'on_preloaded':
           await _runHooks(onPreloadedHooks);
         case 'on_unload':
           await _runHooks(onUnloadHooks);
           if (_alive) {
-            _onUnload();
+            await _onUnload();
           }
       }
+      // mpv continues once the values set without waiting are applied.
+      await Future.wait([..._unawaitedSets]);
     } catch (exception, stacktrace) {
       print(exception);
       print(stacktrace);
     } finally {
       if (_alive) {
+        // Synchronous, but it doesn't wait: mpv's core waits for this hook & answers API calls meanwhile.
         mpv.mpv_hook_continue(_live, id);
       }
     }
@@ -2385,15 +2432,13 @@ class NativePlayer extends PlatformPlayer {
   }
 
   /// `on_load`: the HTTP headers, start & end of the [Media] being loaded.
-  void _onLoad() {
+  Future<void> _onLoad() async {
     // Handle HTTP headers specified in the [Media].
     try {
-      final name = 'path'.toNativeUtf8();
-      final uri = mpv.mpv_get_property_string(_live, name.cast());
+      final uri = await _getPropertyString('path');
       // Get the headers for current [Media] by looking up [uri] in the [HashMap].
-      final headers = Media(uri.cast<Utf8>().toDartString()).httpHeaders;
-      if (headers != null) {
-        final property = 'http-header-fields'.toNativeUtf8();
+      final headers = uri == null ? null : Media(uri).httpHeaders;
+      if (headers != null && _alive) {
         // Allocate & fill the [mpv_node] with the headers.
         final value = calloc<generated.mpv_node>();
         value.ref.format = generated.mpv_format.MPV_FORMAT_NODE_ARRAY;
@@ -2411,118 +2456,60 @@ class NativePlayer extends PlatformPlayer {
               generated.mpv_format.MPV_FORMAT_STRING;
           value.ref.u.list.ref.values[i].u.string = data.cast();
         }
-        mpv.mpv_set_property(
-          _live,
-          property.cast(),
-          generated.mpv_format.MPV_FORMAT_NODE,
-          value.cast(),
-        );
-        // Free the allocated memory.
-        calloc.free(property);
-        for (int i = 0; i < value.ref.u.list.ref.num; i++) {
-          calloc.free(value.ref.u.list.ref.values[i].u.string);
+        try {
+          await _setProperty(
+            'http-header-fields',
+            generated.mpv_format.MPV_FORMAT_NODE,
+            value.cast(),
+          );
+        } finally {
+          // Free the allocated memory.
+          for (int i = 0; i < value.ref.u.list.ref.num; i++) {
+            calloc.free(value.ref.u.list.ref.values[i].u.string);
+          }
+          calloc.free(value.ref.u.list.ref.values);
+          calloc.free(value.ref.u.list);
+          calloc.free(value);
         }
-        calloc.free(value.ref.u.list.ref.values);
-        calloc.free(value.ref.u.list);
-        calloc.free(value);
       }
-      mpv.mpv_free(uri.cast());
-      calloc.free(name);
     } catch (exception, stacktrace) {
       print(exception);
       print(stacktrace);
     }
     // Handle start & end position specified in the [Media].
     try {
-      final name = 'playlist-pos'.toNativeUtf8();
-      final value = calloc<Int64>();
-      value.value = -1;
-
-      mpv.mpv_get_property(
-        _live,
-        name.cast(),
-        generated.mpv_format.MPV_FORMAT_INT64,
-        value.cast(),
-      );
-
-      final index = value.value;
-
-      calloc.free(name.cast());
-      calloc.free(value.cast());
-
-      if (index >= 0) {
+      final index = int.tryParse(await _getPropertyString('playlist-pos') ?? '') ?? -1;
+      if (index >= 0 && index < current.length && _alive) {
         final start = current[index].start;
         final end = current[index].end;
-
         if (start != null) {
-          try {
-            final property = 'start'.toNativeUtf8();
-            final value = (start.inMilliseconds / 1000)
-                .toStringAsFixed(3)
-                .toNativeUtf8();
-            mpv.mpv_set_property_string(_live, property.cast(), value.cast());
-            calloc.free(property);
-            calloc.free(value);
-          } catch (exception, stacktrace) {
-            print(exception);
-            print(stacktrace);
-          }
+          await _setPropertyString(
+            'start',
+            (start.inMilliseconds / 1000).toStringAsFixed(3),
+          );
         }
-
         if (end != null) {
-          try {
-            final property = 'end'.toNativeUtf8();
-            final value = (end.inMilliseconds / 1000)
-                .toStringAsFixed(3)
-                .toNativeUtf8();
-            mpv.mpv_set_property_string(_live, property.cast(), value.cast());
-            calloc.free(property);
-            calloc.free(value);
-          } catch (exception, stacktrace) {
-            print(exception);
-            print(stacktrace);
-          }
+          await _setPropertyString(
+            'end',
+            (end.inMilliseconds / 1000).toStringAsFixed(3),
+          );
         }
       }
-    } catch (_) {}
+    } catch (exception, stacktrace) {
+      print(exception);
+      print(stacktrace);
+    }
   }
 
   /// `on_unload`: resets what [_onLoad] set.
-  void _onUnload() {
-    // Set http-header-fields as [generated.mpv_format.MPV_FORMAT_NONE] [generated.mpv_node].
+  Future<void> _onUnload() async {
     try {
-      final property = 'http-header-fields'.toNativeUtf8();
-      final value = calloc<generated.mpv_node>();
-      value.ref.format = generated.mpv_format.MPV_FORMAT_NONE;
-      mpv.mpv_set_property(
-        _live,
-        property.cast(),
-        generated.mpv_format.MPV_FORMAT_NODE,
-        value.cast(),
-      );
-      calloc.free(property);
-      calloc.free(value);
-    } catch (exception, stacktrace) {
-      print(exception);
-      print(stacktrace);
-    }
-    // Set start & end position as [generated.mpv_format.MPV_FORMAT_NONE] [generated.mpv_node].
-    try {
-      final property = 'start'.toNativeUtf8();
-      final value = 'none'.toNativeUtf8();
-      mpv.mpv_set_property_string(_live, property.cast(), value.cast());
-      calloc.free(property);
-      calloc.free(value);
-    } catch (exception, stacktrace) {
-      print(exception);
-      print(stacktrace);
-    }
-    try {
-      final property = 'end'.toNativeUtf8();
-      final value = 'none'.toNativeUtf8();
-      mpv.mpv_set_property_string(_live, property.cast(), value.cast());
-      calloc.free(property);
-      calloc.free(value);
+      // An empty string clears the list; mpv refuses an MPV_FORMAT_NONE node for it.
+      await Future.wait([
+        _setPropertyString('http-header-fields', ''),
+        _setPropertyString('start', 'none'),
+        _setPropertyString('end', 'none'),
+      ]);
     } catch (exception, stacktrace) {
       print(exception);
       print(stacktrace);
@@ -2664,9 +2651,9 @@ class NativePlayer extends PlatformPlayer {
         if (audioClientName != null) 'audio-client-name': audioClientName,
         if (_tlsVerify case final tlsVerify?) 'tls-verify': tlsVerify ? 'yes' : 'no',
         if (!configuration.osc) ...{
-          // libmpv builds without Lua (e.g. Android) have no osc option; setting it there only logs
-          // "property not found".
-          if (_hasOption('osc')) 'osc': 'no',
+          // libmpv builds without Lua (e.g. Android, freeKC on Windows) have no osc option: see
+          // [_buildOptional].
+          'osc': 'no',
           'osd-level': '0',
         },
         'title': configuration.title,
@@ -2704,6 +2691,13 @@ class NativePlayer extends PlatformPlayer {
         }
       }
 
+      // The hooks: on_load & on_unload for the HTTP headers, start & end of a [Media];
+      // on_preloaded for [onPreloadedHooks], e.g. attaching a video output before the decoders are
+      // created. mpv_hook_add waits for mpv's core, so it runs in another isolate: the core can be
+      // stuck, e.g. opening the audio device for audio-device-list.
+      final libmpv = NativeLibrary.path;
+      await _withHandleElsewhere((ctx) => _addHooksElsewhere(libmpv, ctx));
+
       // Observe the properties to update the state & feed event stream.
       <String, generated.mpv_format>{
         'pause': generated.mpv_format.MPV_FORMAT_FLAG,
@@ -2718,8 +2712,8 @@ class NativePlayer extends PlatformPlayer {
         'cache-buffering-state': generated.mpv_format.MPV_FORMAT_DOUBLE,
         'audio-params': generated.mpv_format.MPV_FORMAT_NODE,
         'audio-bitrate': generated.mpv_format.MPV_FORMAT_DOUBLE,
-        'audio-device': generated.mpv_format.MPV_FORMAT_NODE,
-        'audio-device-list': generated.mpv_format.MPV_FORMAT_NODE,
+        if (observeAudioDevices) 'audio-device': generated.mpv_format.MPV_FORMAT_NODE,
+        if (observeAudioDevices) 'audio-device-list': generated.mpv_format.MPV_FORMAT_NODE,
         'video-params': generated.mpv_format.MPV_FORMAT_NODE,
         'track-list': generated.mpv_format.MPV_FORMAT_NODE,
         'eof-reached': generated.mpv_format.MPV_FORMAT_FLAG,
@@ -2749,18 +2743,6 @@ class NativePlayer extends PlatformPlayer {
         calloc.free(min);
       }
 
-      // Add libmpv hooks for supporting custom HTTP headers in [Media].
-      final load = 'on_load'.toNativeUtf8();
-      final unload = 'on_unload'.toNativeUtf8();
-      mpv.mpv_hook_add(_live, 0, load.cast(), 0);
-      mpv.mpv_hook_add(_live, 0, unload.cast(), 0);
-      calloc.free(load);
-      calloc.free(unload);
-      // [onPreloadedHooks]: e.g. attaching a video output before the decoders are created.
-      final preloaded = 'on_preloaded'.toNativeUtf8();
-      mpv.mpv_hook_add(_live, 0, preloaded.cast(), 0);
-      calloc.free(preloaded);
-
       if (Initializer(mpv).usesIsolate) {
         // Hot-restart cleanup: the handles of the isolate based event loop survive the isolate.
         await NativeReferenceHolder.instance.add(ctx);
@@ -2771,23 +2753,82 @@ class NativePlayer extends PlatformPlayer {
     });
   }
 
-  /// Adds an error to the [Player.stream.error].
-  void _logError(int code, String? text) {
+  /// Adds an error to the [Player.stream.log].
+  void _logError(int code, String? text, {String level = 'error'}) {
     if (code < 0 && !logController.isClosed) {
       final message = mpv.mpv_error_string(code).cast<Utf8>().toDartString();
       logController.add(
         PlayerLog(
           prefix: 'media_kit',
-          level: 'error',
+          level: level,
           text: 'error: $message $text',
         ),
       );
     }
   }
 
-  int _asyncRequestNumber = 0;
+  /// The events that reply to a request: the request logs their error.
+  static const Set<generated.mpv_event_id> _replyEvents = {
+    generated.mpv_event_id.MPV_EVENT_GET_PROPERTY_REPLY,
+    generated.mpv_event_id.MPV_EVENT_SET_PROPERTY_REPLY,
+    generated.mpv_event_id.MPV_EVENT_COMMAND_REPLY,
+  };
+
+  /// Options that only some libmpv builds have: the ones of mpv's Lua scripts (osc, ytdl, ...),
+  /// missing from builds without Lua (e.g. Android, freeKC on Windows). Setting one of them there
+  /// does nothing, so its "property not found" is logged at `debug` level, not as an error.
+  static const Set<String> _buildOptional = {
+    'osc',
+    'ytdl',
+    'ytdl-format',
+    'ytdl-raw-options',
+    'load-stats-overlay',
+    'load-osd-console',
+    'load-auto-profiles',
+    'load-select',
+    'load-positioning',
+    'load-commands',
+    'load-context-menu',
+    'script-opts',
+    'load-scripts',
+    'scripts',
+  };
+
+  /// The level of the log line for [code] from setting [name].
+  String _setPropertyLogLevel(String name, int code) =>
+      code == generated.mpv_error.MPV_ERROR_PROPERTY_NOT_FOUND.value &&
+              _buildOptional.contains(name)
+          ? 'debug'
+          : 'error';
+
+  int _asyncRequestNumber = 1;
   final Map<int, Completer<int>> _setPropertyRequests = {};
   final Map<int, Completer<int>> _commandRequests = {};
+  final Map<int, Completer<String?>> _getPropertyRequests = {};
+
+  /// Reads [name] as a string through mpv's asynchronous API: it never blocks this isolate, even
+  /// while mpv's core is stuck. Null if mpv has no value for it.
+  Future<String?> _getPropertyString(String name) async {
+    final namePtr = name.toNativeUtf8();
+    try {
+      final requestNumber = _asyncRequestNumber++;
+      final completer =
+          _getPropertyRequests[requestNumber] = Completer<String?>();
+      final immediate = mpv.mpv_get_property_async(
+        _live,
+        requestNumber,
+        namePtr.cast(),
+        generated.mpv_format.MPV_FORMAT_STRING,
+      );
+      if (immediate < 0) {
+        _getPropertyRequests.remove(requestNumber);
+        return null;
+      }
+      return await completer.future;
+    } finally {
+      calloc.free(namePtr);
+    }
+  }
 
   Future<void> _setProperty(
     String name,
@@ -2807,14 +2848,15 @@ class NativePlayer extends PlatformPlayer {
           format,
           data,
         );
-        final text = '_setProperty($name, $format)';
+        final text = '_setProperty($name, ${format.name})';
         if (immediate < 0) {
           // Sending failed, so no reply event will remove this request.
           _setPropertyRequests.remove(requestNumber);
-          _logError(immediate, text);
+          _logError(immediate, text, level: _setPropertyLogLevel(name, immediate));
           return;
         }
-        _logError(await completer.future, text);
+        final code = await completer.future;
+        _logError(code, text, level: _setPropertyLogLevel(name, code));
       } else {
         mpv.mpv_set_property(_live, namePtr.cast(), format, data);
       }
@@ -2824,7 +2866,8 @@ class NativePlayer extends PlatformPlayer {
   }
 
   Future<void> _setPropertyFlag(String name, bool value) async {
-    final ptr = calloc<Bool>(1)..value = value;
+    // MPV_FORMAT_FLAG is a C int.
+    final ptr = calloc<Int32>(1)..value = value ? 1 : 0;
     await _setProperty(name, generated.mpv_format.MPV_FORMAT_FLAG, ptr.cast());
     calloc.free(ptr);
   }
@@ -2862,21 +2905,6 @@ class NativePlayer extends PlatformPlayer {
   /// The --tls-verify to set, or null to keep mpv's default. See [PlayerConfiguration.tlsVerify].
   bool? get _tlsVerify =>
       configuration.tlsVerify ?? (Platform.isWindows ? false : null);
-
-  /// Whether the libmpv build has the option [name]; some options only exist in certain builds.
-  bool _hasOption(String name) {
-    final property = 'option-info/$name/name'.toNativeUtf8();
-    try {
-      final value = mpv.mpv_get_property_string(_live, property.cast());
-      if (value == nullptr) {
-        return false;
-      }
-      mpv.mpv_free(value.cast());
-      return true;
-    } finally {
-      calloc.free(property);
-    }
-  }
 
   Future<void> _setPropertyString(String name, String value) async {
     final string = value.toNativeUtf8();
@@ -3104,9 +3132,33 @@ class NativePlayer extends PlatformPlayer {
   /// Whether the [NativePlayer] is initialized for unit-testing.
   @visibleForTesting
   static bool test = false;
+
+  /// Whether new players observe `audio-device` & `audio-device-list`. Reading them makes mpv open
+  /// the audio hotplug (PipeWire, PulseAudio, ...). Tests without an audio server turn it off: on
+  /// CI, libpipewire's failure path hung mpv's core in `pw_thread_loop_stop` when the handle was
+  /// destroyed.
+  @visibleForTesting
+  static bool observeAudioDevices = true;
 }
 
 // --------------------------------------------------
+
+/// Runs [_addHooks] in a new isolate. Top-level: the closure sent to it captures nothing else.
+Future<void> _addHooksElsewhere(String libmpv, int ctx) => Isolate.run(
+      () => _addHooks(libmpv, ctx),
+      debugName: 'media_kit: mpv_hook_add',
+    );
+
+/// Adds the hooks [NativePlayer] handles to the handle at [ctx].
+void _addHooks(String libmpv, int ctx) {
+  final mpv = generated.MPV(DynamicLibrary.open(libmpv));
+  final handle = Pointer<generated.mpv_handle>.fromAddress(ctx);
+  for (final name in const ['on_load', 'on_unload', 'on_preloaded']) {
+    final native = name.toNativeUtf8();
+    mpv.mpv_hook_add(handle, 0, native.cast(), 0);
+    calloc.free(native);
+  }
+}
 
 class _ScreenshotData {
   final int ctx;
